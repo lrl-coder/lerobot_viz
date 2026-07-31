@@ -1,0 +1,111 @@
+#!/usr/bin/env python
+
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import csv
+from io import StringIO
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from flask import Flask, render_template
+
+from lerobot.datasets.utils import IterableNamespace
+from lerobot.scripts.visualize_dataset_html import get_episode_data
+
+
+def test_get_episode_data_supports_all_numeric_dtypes(monkeypatch):
+    dataset = IterableNamespace(
+        {
+            "repo_id": "local/no_video",
+            "chunks_size": 1000,
+            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+            "features": {
+                "action": {"dtype": "float64", "shape": [2], "names": ["x"]},
+                "observation.state": {
+                    "dtype": "float32",
+                    "shape": [2],
+                    "names": ["position", "velocity"],
+                },
+                "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+                "timestamp": {"dtype": "float32", "shape": [1], "names": None},
+                "observation.image": {
+                    "dtype": "image",
+                    "shape": [8, 8, 3],
+                    "names": ["height", "width", "channels"],
+                },
+            },
+        }
+    )
+    frame = pd.DataFrame(
+        {
+            "action": [np.array([1.0, 2.0]), np.array([3.0, 4.0])],
+            "observation.state": [np.array([5.0, 6.0]), np.array([7.0, 8.0])],
+            "frame_index": [0, 1],
+            "timestamp": [0.0, 0.1],
+        }
+    )
+    monkeypatch.setattr(pd, "read_parquet", lambda _: frame)
+
+    csv_text, columns, ignored_columns = get_episode_data(dataset, 0)
+    rows = list(csv.reader(StringIO(csv_text)))
+
+    assert [column["key"] for column in columns] == [
+        "action",
+        "observation.state",
+        "frame_index",
+    ]
+    assert columns[0]["value"] == ["action_0", "action_1"]
+    assert ignored_columns == []
+    assert len(rows[0]) == len(rows[1]) == 6
+
+
+def test_template_renders_generated_video_for_image_dataset():
+    template_folder = Path(__file__).parents[2] / "src" / "lerobot" / "templates"
+    app = Flask(__name__, template_folder=template_folder)
+
+    with app.app_context():
+        page = render_template(
+            "visualize_dataset_template.html",
+            episode_id=0,
+            episodes=[0],
+            dataset_info={
+                "repo_id": "local/no_video",
+                "num_samples": 2,
+                "num_episodes": 1,
+                "fps": 10,
+            },
+            videos_info=[
+                {
+                    "url": "/local/no_video/episode_0/image-video/observation.image",
+                    "filename": "observation.image",
+                    "generated": True,
+                }
+            ],
+            has_generated_videos=True,
+            check_video_codec=False,
+            language_instruction=["Do the task."],
+            episode_data_csv_str="timestamp,state_0\r\n0.0,1.0\r\n",
+            columns=[{"key": "state", "value": ["state_0"]}],
+            ignored_columns=[],
+        )
+
+    assert "<video" in page
+    assert "filter videos" in page
+    assert "/local/no_video/episode_0/image-video/observation.image" in page
+    assert "generates and caches H.264 videos" in page
+    assert "Language Instruction:" in page
+    assert "Do the task." in page
+    assert "nVideos: 1" in page
