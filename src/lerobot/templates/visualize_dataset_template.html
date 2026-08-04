@@ -146,9 +146,9 @@
             </div>
         </div>
 
-        <div class="flex flex-wrap gap-x-2 gap-y-6">
+        <div class="grid grid-cols-4 gap-x-2 gap-y-6 max-w-[98rem]">
             {% for video_info in videos_info %}
-            <div x-show="!videoCodecError && videosKeysSelected.includes('{{ video_info.filename }}')" class="max-w-96 relative">
+            <div x-show='!videoCodecError && videosKeysSelected.includes({{ video_info.filename | tojson }})' class="max-w-96 relative">
                 <p class="absolute inset-x-0 -top-4 text-sm text-gray-300 bg-gray-800 px-2 rounded-t-xl truncate">{{ video_info.filename }}</p>
                 <video muted loop preload="auto" type="video/mp4" class="object-contain w-full h-full"
                     @canplaythrough="videoCanPlay"

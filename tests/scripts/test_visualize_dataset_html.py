@@ -20,10 +20,17 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from flask import Flask, render_template
 
 from lerobot.datasets.utils import IterableNamespace
-from lerobot.scripts.visualize_dataset_html import get_episode_data
+from lerobot.scripts.visualize_dataset_html import (
+    colorize_depth_frame,
+    get_depth_keys,
+    get_episode_data,
+    get_rgb_key_for_depth,
+    insert_depth_videos_next_to_rgb,
+)
 
 
 def test_get_episode_data_supports_all_numeric_dtypes(monkeypatch):
@@ -109,3 +116,68 @@ def test_template_renders_generated_video_for_image_dataset():
     assert "Language Instruction:" in page
     assert "Do the task." in page
     assert "nVideos: 1" in page
+    assert "grid grid-cols-4" in page
+    assert "x-show='!videoCodecError && videosKeysSelected.includes(\"observation.image\")'" in page
+
+
+def test_depth_streams_are_matched_and_placed_next_to_rgb():
+    rgb_videos = [
+        {"camera_key": "observation.images.third_view"},
+        {"camera_key": "observation.images.wrist"},
+    ]
+    depth_videos = [
+        {
+            "camera_key": "observation.images.depth.wrist",
+            "rgb_key": "observation.images.wrist",
+        },
+        {
+            "camera_key": "observation.images.depth.third_view",
+            "rgb_key": "observation.images.third_view",
+        },
+    ]
+
+    ordered = insert_depth_videos_next_to_rgb(rgb_videos, depth_videos)
+
+    assert [video["camera_key"] for video in ordered] == [
+        "observation.images.third_view",
+        "observation.images.depth.third_view",
+        "observation.images.wrist",
+        "observation.images.depth.wrist",
+    ]
+    assert (
+        get_rgb_key_for_depth(
+            "observation.images.depth.third_view",
+            [video["camera_key"] for video in rgb_videos],
+        )
+        == "observation.images.third_view"
+    )
+
+
+def test_colorize_depth_frame_uses_black_for_invalid_depth():
+    depth = np.array([[0, 100, 200], [np.nan, 150, np.inf]], dtype=np.float32)
+
+    colored = colorize_depth_frame(depth, depth_min=100, depth_max=200)
+
+    assert colored.shape == (2, 3, 3)
+    assert colored.dtype == np.uint8
+    assert np.all(colored[0, 0] == 0)
+    assert np.all(colored[1, 0] == 0)
+    assert np.all(colored[1, 2] == 0)
+    assert not np.array_equal(colored[0, 1], colored[0, 2])
+
+
+def test_get_depth_keys_filters_non_depth_datasets(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    depth_path = tmp_path / "episode_000000.h5"
+    with h5py.File(depth_path, "w") as depth_file:
+        depth_file.create_dataset(
+            "observation.images.depth.third_view",
+            data=np.zeros((2, 4, 5), dtype=np.uint16),
+        )
+        depth_file.create_dataset(
+            "observation.images.depth.invalid_shape",
+            data=np.zeros((2, 4), dtype=np.uint16),
+        )
+        depth_file.create_dataset("camera_timestamp_ns", data=np.zeros(2, dtype=np.int64))
+
+    assert get_depth_keys(depth_path) == ["observation.images.depth.third_view"]
