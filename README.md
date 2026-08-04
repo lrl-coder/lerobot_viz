@@ -60,11 +60,11 @@ PYTHONPATH="$PWD/lerobot-src-v0.3.3/src" python -m lerobot.scripts.visualize_dat
 http://服务器IP:9090/local/dataset_name/episode_0
 ```
 
-如果数据集目录下存在 `depth/episode_XXXXXX.h5`，页面会自动读取其中形如
+如果数据集目录下存在 `video/depth/episode_XXXXXX.h5`，页面会自动读取其中形如
 `observation.images.depth.<camera>` 的三维深度数组，并放在同名 RGB 相机旁边展示。例如：
 
 ```text
-/path/to/dataset/depth/episode_000000.h5
+/path/to/dataset/video/depth/episode_000000.h5
 ```
 
 深度文件位于其他目录时，添加：
@@ -73,10 +73,10 @@ http://服务器IP:9090/local/dataset_name/episode_0
 --depth-dir /path/to/depth
 ```
 
-首次打开 episode 时会把深度帧转换为彩色 H.264 视频，并缓存到
-`ROOT/.lerobot_viz_cache/depth-videos/`。同一 episode 后续会直接使用缓存；
-H5 文件更新后会自动重新生成。深度颜色范围使用整段 episode 中有效像素的
-1%–99% 分位数固定归一化，零值和无效值显示为黑色，因此播放时不会因逐帧缩放而闪烁。
+首次打开 episode 时会把深度帧转换为彩色 H.264 视频，并缓存到可视化输出目录的
+`static/generated-videos/depth/`。未指定 `--output-dir` 时使用系统临时目录。
+同一 episode 后续会直接使用缓存；H5 文件更新后会自动重新生成。深度颜色范围使用整段
+episode 中有效像素的 1%–99% 分位数固定归一化，零值和无效值显示为黑色，因此播放时不会因逐帧缩放而闪烁。
 
 如只需预览部分 episode，可在运行命令中添加：
 

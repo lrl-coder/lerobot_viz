@@ -101,7 +101,7 @@ def _require_h5py():
 
 
 def get_depth_episode_path(dataset_root: Path, episode_id: int, depth_dir: Path | None = None) -> Path:
-    depth_dir = Path(depth_dir) if depth_dir is not None else Path(dataset_root) / "depth"
+    depth_dir = Path(depth_dir) if depth_dir is not None else Path(dataset_root) / "video" / "depth"
     return depth_dir / f"episode_{episode_id:06d}.h5"
 
 
@@ -1191,7 +1191,7 @@ def main():
         default=None,
         help=(
             "Directory containing episode_XXXXXX.h5 depth files. "
-            "By default, automatically uses ROOT/depth when it exists."
+            "By default, automatically uses ROOT/video/depth."
         ),
     )
     parser.add_argument(

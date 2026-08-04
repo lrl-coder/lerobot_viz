@@ -26,12 +26,24 @@ from flask import Flask, render_template
 from lerobot.datasets.utils import IterableNamespace
 from lerobot.scripts.visualize_dataset_html import (
     colorize_depth_frame,
+    get_depth_episode_path,
     get_depth_keys,
     get_episode_data,
     get_raw_image_frame_paths,
     get_rgb_key_for_depth,
     insert_depth_videos_next_to_rgb,
 )
+
+
+def test_get_depth_episode_path_defaults_to_video_depth_and_allows_override(tmp_path):
+    assert get_depth_episode_path(tmp_path, episode_id=3) == (
+        tmp_path / "video" / "depth" / "episode_000003.h5"
+    )
+
+    custom_depth_dir = tmp_path / "custom-depth"
+    assert get_depth_episode_path(tmp_path, episode_id=4, depth_dir=custom_depth_dir) == (
+        custom_depth_dir / "episode_000004.h5"
+    )
 
 
 def test_get_raw_image_frame_paths_supports_capture_layout_and_numeric_sort(tmp_path):
