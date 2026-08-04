@@ -437,9 +437,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 are already present in the local cache, this will be faster. However, files loaded might not
                 be in sync with the version on the hub, especially if you specified 'revision'. Defaults to
                 False.
-            download_videos (bool, optional): Flag to download the videos. Note that when set to True but the
-                video files are already present on local disk, they won't be downloaded again. Defaults to
-                True.
+            download_videos (bool, optional): Flag to download and require the videos. When False, the
+                metadata and parquet files can be loaded without local video files. Accessing a video feature
+                still requires the corresponding video to be available. Defaults to True.
             video_backend (str | None, optional): Video backend to use for decoding videos. Defaults to torchcodec when available int the platform; otherwise, defaults to 'pyav'.
                 You can also use the 'pyav' decoder used by Torchvision, which used to be the default option, or 'video_reader' which is another decoder of Torchvision.
             batch_encoding_size (int, optional): Number of episodes to accumulate before batch encoding videos.
@@ -476,7 +476,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         try:
             if force_cache_sync:
                 raise FileNotFoundError
-            assert all((self.root / fpath).is_file() for fpath in self.get_episodes_file_paths())
+            assert all(
+                (self.root / fpath).is_file()
+                for fpath in self.get_episodes_file_paths(include_videos=download_videos)
+            )
             self.hf_dataset = self.load_hf_dataset()
         except (AssertionError, FileNotFoundError, NotADirectoryError):
             self.revision = get_safe_version(self.repo_id, self.revision)
@@ -577,14 +580,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
         files = None
         ignore_patterns = None if download_videos else "videos/"
         if self.episodes is not None:
-            files = self.get_episodes_file_paths()
+            files = self.get_episodes_file_paths(include_videos=download_videos)
 
         self.pull_from_repo(allow_patterns=files, ignore_patterns=ignore_patterns)
 
-    def get_episodes_file_paths(self) -> list[Path]:
+    def get_episodes_file_paths(self, include_videos: bool = True) -> list[Path]:
         episodes = self.episodes if self.episodes is not None else list(range(self.meta.total_episodes))
         fpaths = [str(self.meta.get_data_file_path(ep_idx)) for ep_idx in episodes]
-        if len(self.meta.video_keys) > 0:
+        if include_videos and len(self.meta.video_keys) > 0:
             video_files = [
                 str(self.meta.get_video_file_path(ep_idx, vid_key))
                 for vid_key in self.meta.video_keys

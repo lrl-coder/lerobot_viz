@@ -28,9 +28,35 @@ from lerobot.scripts.visualize_dataset_html import (
     colorize_depth_frame,
     get_depth_keys,
     get_episode_data,
+    get_raw_image_frame_paths,
     get_rgb_key_for_depth,
     insert_depth_videos_next_to_rgb,
 )
+
+
+def test_get_raw_image_frame_paths_supports_capture_layout_and_numeric_sort(tmp_path):
+    image_dir = (
+        tmp_path
+        / "video"
+        / "images"
+        / "observation.images.wrist"
+        / "episode_000003"
+    )
+    image_dir.mkdir(parents=True)
+    for filename in ("frame_000010.png", "frame_000002.png", "frame_000001.png"):
+        (image_dir / filename).touch()
+
+    frame_paths = get_raw_image_frame_paths(
+        tmp_path,
+        episode_id=3,
+        camera_key="observation.images.wrist",
+    )
+
+    assert [path.name for path in frame_paths] == [
+        "frame_000001.png",
+        "frame_000002.png",
+        "frame_000010.png",
+    ]
 
 
 def test_get_episode_data_supports_all_numeric_dtypes(monkeypatch):

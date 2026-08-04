@@ -151,6 +151,34 @@ def insert_depth_videos_next_to_rgb(videos_info: list[dict], depth_videos_info: 
     return ordered_videos
 
 
+def get_raw_image_frame_paths(dataset_root: Path, episode_id: int, camera_key: str) -> list[Path]:
+    """Find an episode stored as raw image frames instead of the videos declared in metadata."""
+    episode_dirname = f"episode_{episode_id:06d}"
+    candidate_dirs = (
+        Path(dataset_root) / "video" / "images" / camera_key / episode_dirname,
+        Path(dataset_root) / "videos" / "images" / camera_key / episode_dirname,
+        Path(dataset_root) / "images" / camera_key / episode_dirname,
+    )
+    supported_suffixes = {".png", ".jpg", ".jpeg"}
+
+    for image_dir in candidate_dirs:
+        if not image_dir.is_dir():
+            continue
+        frame_paths = [
+            path
+            for path in image_dir.glob("frame_*.*")
+            if path.is_file() and path.suffix.lower() in supported_suffixes
+        ]
+        if frame_paths:
+            return sorted(frame_paths, key=_raw_frame_sort_key)
+    return []
+
+
+def _raw_frame_sort_key(frame_path: Path) -> tuple[int, int | str]:
+    match = re.fullmatch(r"frame_(\d+)\.[^.]+", frame_path.name, flags=re.IGNORECASE)
+    return (0, int(match.group(1))) if match else (1, frame_path.name)
+
+
 def get_depth_range(depth_dataset, max_sample_frames: int = 32) -> tuple[float, float]:
     """Compute a stable visualization range from sampled, non-zero depth pixels."""
     frame_count = len(depth_dataset)
@@ -217,9 +245,9 @@ def run_server(
         safe_image_key = re.sub(r"[^A-Za-z0-9_.-]", "_", image_key)
         chunk = episode_id // dataset.meta.chunks_size
         return (
-            dataset.root
-            / ".lerobot_viz_cache"
-            / "videos"
+            Path(app.static_folder)
+            / "generated-videos"
+            / "embedded-images"
             / f"chunk-{chunk:03d}"
             / safe_image_key
             / f"episode_{episode_id:06d}.mp4"
@@ -229,11 +257,23 @@ def run_server(
         safe_depth_key = re.sub(r"[^A-Za-z0-9_.-]", "_", depth_key)
         chunk = episode_id // dataset.meta.chunks_size
         return (
-            dataset.root
-            / ".lerobot_viz_cache"
-            / "depth-videos"
+            Path(app.static_folder)
+            / "generated-videos"
+            / "depth"
             / f"chunk-{chunk:03d}"
             / safe_depth_key
+            / f"episode_{episode_id:06d}.mp4"
+        )
+
+    def get_raw_image_video_path(episode_id: int, camera_key: str) -> Path:
+        safe_camera_key = re.sub(r"[^A-Za-z0-9_.-]", "_", camera_key)
+        chunk = episode_id // dataset.meta.chunks_size
+        return (
+            Path(app.static_folder)
+            / "generated-videos"
+            / "raw-images"
+            / f"chunk-{chunk:03d}"
+            / safe_camera_key
             / f"episode_{episode_id:06d}.mp4"
         )
 
@@ -380,6 +420,134 @@ def run_server(
                 raise
 
             logging.info("Cached video ready: %s", video_path)
+            return video_path
+
+    def encode_raw_frames_with_ffmpeg(frame_paths: list[Path], video_path: Path) -> tuple[bool, str]:
+        command = [
+            shutil.which("ffmpeg"),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "image2pipe",
+            "-framerate",
+            str(dataset.fps),
+            "-vcodec",
+            "png",
+            "-i",
+            "pipe:0",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            str(dataset.fps),
+            "-movflags",
+            "+faststart",
+            str(video_path),
+        ]
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            for frame_path in frame_paths:
+                if frame_path.suffix.lower() == ".png":
+                    process.stdin.write(frame_path.read_bytes())
+                else:
+                    with PILImage.open(frame_path) as image:
+                        buffer = BytesIO()
+                        image.convert("RGB").save(buffer, format="PNG")
+                    process.stdin.write(buffer.getvalue())
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+
+        error = process.stderr.read().decode(errors="replace")
+        return process.wait() == 0, error
+
+    def encode_raw_frames_with_pyav(frame_paths: list[Path], video_path: Path) -> None:
+        with PILImage.open(frame_paths[0]) as first_image:
+            width, height = first_image.size
+
+        with av.open(str(video_path), mode="w", format="mp4", options={"movflags": "faststart"}) as output:
+            stream = output.add_stream(
+                "libx264",
+                dataset.fps,
+                options={"crf": "23", "preset": "veryfast", "g": str(dataset.fps)},
+            )
+            stream.width = width
+            stream.height = height
+            stream.pix_fmt = "yuv420p"
+
+            for frame_path in frame_paths:
+                with PILImage.open(frame_path) as image:
+                    video_frame = av.VideoFrame.from_image(image.convert("RGB"))
+                for packet in stream.encode(video_frame):
+                    output.mux(packet)
+
+            for packet in stream.encode():
+                output.mux(packet)
+
+    def generate_raw_image_video(episode_id: int, camera_key: str) -> Path:
+        video_path = get_raw_image_video_path(episode_id, camera_key)
+        if video_path.is_file():
+            return video_path
+
+        with video_generation_locks_guard:
+            generation_lock = video_generation_locks.setdefault(video_path, Lock())
+
+        with generation_lock:
+            if video_path.is_file():
+                return video_path
+
+            frame_paths = get_raw_image_frame_paths(dataset.root, episode_id, camera_key)
+            if not frame_paths:
+                raise FileNotFoundError(
+                    f"No MP4 or raw frames found for episode {episode_id}, camera {camera_key!r}."
+                )
+
+            episode_position = get_episode_position(episode_id)
+            expected_frames = int(
+                dataset.episode_data_index["to"][episode_position]
+                - dataset.episode_data_index["from"][episode_position]
+            )
+            if len(frame_paths) != expected_frames:
+                raise RuntimeError(
+                    f"Raw frame count mismatch for episode {episode_id}, camera {camera_key!r}: "
+                    f"found {len(frame_paths)}, expected {expected_frames}."
+                )
+
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = video_path.with_suffix(".tmp.mp4")
+            logging.info(
+                "Generating temporary H.264 video for episode %s, %s (%s raw frames)",
+                episode_id,
+                camera_key,
+                len(frame_paths),
+            )
+            try:
+                if shutil.which("ffmpeg") is not None:
+                    succeeded, error = encode_raw_frames_with_ffmpeg(frame_paths, temporary_path)
+                    if not succeeded:
+                        raise RuntimeError(f"FFmpeg video encoding failed:\n{error.strip()}")
+                else:
+                    logging.warning("FFmpeg not found; falling back to PyAV for H.264 encoding")
+                    encode_raw_frames_with_pyav(frame_paths, temporary_path)
+                temporary_path.replace(video_path)
+            except Exception:
+                temporary_path.unlink(missing_ok=True)
+                raise
+
+            logging.info("Temporary video ready: %s", video_path)
             return video_path
 
     def encode_depth_video_with_ffmpeg(
@@ -602,6 +770,33 @@ def run_server(
         )
 
     @app.route(
+        "/<string:dataset_namespace>/<string:dataset_name>/episode_<int:episode_id>/raw-image-video/<path:camera_key>"
+    )
+    def show_raw_image_video(
+        dataset_namespace,
+        dataset_name,
+        episode_id,
+        camera_key,
+        dataset=dataset,
+    ):
+        repo_id = f"{dataset_namespace}/{dataset_name}"
+        if (
+            not isinstance(dataset, LeRobotDataset)
+            or dataset.repo_id != repo_id
+            or camera_key not in dataset.meta.video_keys
+            or not get_raw_image_frame_paths(dataset.root, episode_id, camera_key)
+        ):
+            abort(404)
+
+        video_path = generate_raw_image_video(episode_id, camera_key)
+        return send_file(
+            video_path,
+            mimetype="video/mp4",
+            conditional=True,
+            max_age=31536000,
+        )
+
+    @app.route(
         "/<string:dataset_namespace>/<string:dataset_name>/episode_<int:episode_id>/depth-video/<path:depth_key>"
     )
     def show_depth_video(
@@ -661,19 +856,40 @@ def run_server(
         has_generated_videos = False
         check_video_codec = False
         if isinstance(dataset, LeRobotDataset):
-            video_paths = [
-                dataset.meta.get_video_file_path(episode_id, key) for key in dataset.meta.video_keys
-            ]
-            videos_info = [
-                {
-                    "url": url_for("static", filename=str(video_path).replace("\\", "/")),
-                    "filename": video_path.parent.name,
-                    "camera_key": key,
-                    "generated": False,
-                }
-                for key, video_path in zip(dataset.meta.video_keys, video_paths, strict=True)
-            ]
-            check_video_codec = bool(video_paths)
+            videos_info = []
+            for key in dataset.meta.video_keys:
+                video_path = dataset.meta.get_video_file_path(episode_id, key)
+                if (dataset.root / video_path).is_file():
+                    videos_info.append(
+                        {
+                            "url": url_for("static", filename=str(video_path).replace("\\", "/")),
+                            "filename": video_path.parent.name,
+                            "camera_key": key,
+                            "generated": False,
+                        }
+                    )
+                elif get_raw_image_frame_paths(dataset.root, episode_id, key):
+                    videos_info.append(
+                        {
+                            "url": url_for(
+                                "show_raw_image_video",
+                                dataset_namespace=dataset_namespace,
+                                dataset_name=dataset_name,
+                                episode_id=episode_id,
+                                camera_key=key,
+                            ),
+                            "filename": key,
+                            "camera_key": key,
+                            "generated": True,
+                        }
+                    )
+                else:
+                    logging.warning(
+                        "Skipping missing camera stream %s for episode %s: no MP4 or raw frames found",
+                        key,
+                        episode_id,
+                    )
+            check_video_codec = any(not info["generated"] for info in videos_info)
             for image_key in dataset.meta.image_keys:
                 videos_info.append(
                     {
@@ -928,7 +1144,11 @@ def visualize_dataset_html(
     else:
         # Create a simlink from the dataset video folder containing mp4 files to the output directory
         # so that the http server can get access to the mp4 files.
-        if isinstance(dataset, LeRobotDataset) and dataset.meta.video_keys:
+        if (
+            isinstance(dataset, LeRobotDataset)
+            and dataset.meta.video_keys
+            and (dataset.root / "videos").is_dir()
+        ):
             ln_videos_dir = static_dir / "videos"
             if not ln_videos_dir.exists():
                 ln_videos_dir.symlink_to((dataset.root / "videos").resolve().as_posix())
@@ -1027,7 +1247,13 @@ def main():
     dataset = None
     if repo_id:
         dataset = (
-            LeRobotDataset(repo_id, root=root, episodes=episodes, tolerance_s=tolerance_s)
+            LeRobotDataset(
+                repo_id,
+                root=root,
+                episodes=episodes,
+                tolerance_s=tolerance_s,
+                download_videos=root is None,
+            )
             if not load_from_hf_hub
             else get_dataset_info(repo_id)
         )
