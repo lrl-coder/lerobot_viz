@@ -1115,7 +1115,7 @@ def visualize_dataset_html(
     template_dir = Path(__file__).resolve().parent.parent / "templates"
 
     if output_dir is None:
-        # Create a temporary directory that will be automatically cleaned up
+        # Create a unique temporary output directory for this process.
         output_dir = tempfile.mkdtemp(prefix="lerobot_visualize_dataset_")
 
     output_dir = Path(output_dir)
@@ -1129,6 +1129,14 @@ def visualize_dataset_html(
 
     static_dir = output_dir / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
+    generated_videos_dir = static_dir / "generated-videos"
+    if generated_videos_dir.is_symlink() or generated_videos_dir.is_file():
+        generated_videos_dir.unlink()
+    elif generated_videos_dir.is_dir():
+        shutil.rmtree(generated_videos_dir)
+    logging.info(
+        "Generated video cache starts empty for this process: %s", generated_videos_dir
+    )
 
     if dataset is None:
         if serve:

@@ -32,7 +32,22 @@ from lerobot.scripts.visualize_dataset_html import (
     get_raw_image_frame_paths,
     get_rgb_key_for_depth,
     insert_depth_videos_next_to_rgb,
+    visualize_dataset_html,
 )
+
+
+def test_visualize_dataset_html_clears_only_generated_video_cache_on_start(tmp_path):
+    output_dir = tmp_path / "output"
+    generated_video = output_dir / "static" / "generated-videos" / "depth" / "stale.mp4"
+    generated_video.parent.mkdir(parents=True)
+    generated_video.touch()
+    preserved_file = output_dir / "static" / "keep.txt"
+    preserved_file.touch()
+
+    visualize_dataset_html(dataset=None, output_dir=output_dir, serve=False)
+
+    assert not generated_video.parent.parent.exists()
+    assert preserved_file.is_file()
 
 
 def test_get_depth_episode_path_defaults_to_video_depth_and_allows_override(tmp_path):
