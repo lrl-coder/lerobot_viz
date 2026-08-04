@@ -57,6 +57,7 @@ import csv
 import json
 import logging
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -229,6 +230,7 @@ def run_server(
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # specifying not to cache
 
     video_generation_locks: dict[Path, Lock] = {}
+    video_cache_version = secrets.token_hex(8)
     video_generation_locks_guard = Lock()
 
     def get_episode_position(episode_id: int) -> int:
@@ -862,7 +864,11 @@ def run_server(
                 if (dataset.root / video_path).is_file():
                     videos_info.append(
                         {
-                            "url": url_for("static", filename=str(video_path).replace("\\", "/")),
+                            "url": url_for(
+                                "static",
+                                filename=str(video_path).replace("\\", "/"),
+                                v=video_cache_version,
+                            ),
                             "filename": video_path.parent.name,
                             "camera_key": key,
                             "generated": False,
@@ -877,6 +883,7 @@ def run_server(
                                 dataset_name=dataset_name,
                                 episode_id=episode_id,
                                 camera_key=key,
+                                v=video_cache_version,
                             ),
                             "filename": key,
                             "camera_key": key,
@@ -897,6 +904,7 @@ def run_server(
                             "show_image_video",
                             dataset_namespace=dataset_namespace,
                             dataset_name=dataset_name,
+                            v=video_cache_version,
                             episode_id=episode_id,
                             image_key=image_key,
                         ),
@@ -919,6 +927,7 @@ def run_server(
                                 dataset_name=dataset_name,
                                 episode_id=episode_id,
                                 depth_key=depth_key,
+                                v=video_cache_version,
                             ),
                             "filename": depth_key,
                             "camera_key": depth_key,
