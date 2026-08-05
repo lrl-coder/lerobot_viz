@@ -270,7 +270,8 @@ def test_template_renders_generated_video_for_image_dataset():
         )
 
     assert "<video" in page
-    assert "muted autoplay playsinline loop" in page
+    assert "muted autoplay playsinline preload" in page
+    assert "<video muted autoplay playsinline loop" not in page
     assert "filter videos" in page
     assert "/local/no_video/episode_0/image-video/observation.image" in page
     assert "generates and caches H.264 videos" in page

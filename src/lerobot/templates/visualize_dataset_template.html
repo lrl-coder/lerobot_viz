@@ -150,7 +150,7 @@
             {% for video_info in videos_info %}
             <div x-show='!videoCodecError && videosKeysSelected.includes({{ video_info.filename | tojson }})' class="w-full min-w-0 relative">
                 <p class="absolute inset-x-0 -top-4 text-sm text-gray-300 bg-gray-800 px-2 rounded-t-xl truncate">{{ video_info.filename }}</p>
-                <video muted autoplay playsinline loop preload="auto" type="video/mp4" class="object-contain w-full h-auto max-h-[70vh]"
+                <video muted autoplay playsinline preload="auto" type="video/mp4" class="object-contain w-full h-auto max-h-[70vh]"
                     @canplaythrough="videoCanPlay"
                     @timeupdate="videoTimeUpdated($event.currentTarget)"
                     @ended="() => {
