@@ -146,11 +146,11 @@
             </div>
         </div>
 
-        <div class="grid grid-cols-4 gap-x-2 gap-y-6 max-w-[98rem]">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-3 gap-y-6 w-full max-w-[98rem]">
             {% for video_info in videos_info %}
-            <div x-show='!videoCodecError && videosKeysSelected.includes({{ video_info.filename | tojson }})' class="max-w-96 relative">
+            <div x-show='!videoCodecError && videosKeysSelected.includes({{ video_info.filename | tojson }})' class="w-full min-w-0 relative">
                 <p class="absolute inset-x-0 -top-4 text-sm text-gray-300 bg-gray-800 px-2 rounded-t-xl truncate">{{ video_info.filename }}</p>
-                <video muted loop preload="auto" type="video/mp4" class="object-contain w-full h-full"
+                <video muted autoplay playsinline loop preload="auto" type="video/mp4" class="object-contain w-full h-auto max-h-[70vh]"
                     @canplaythrough="videoCanPlay"
                     @timeupdate="videoTimeUpdated($event.currentTarget)"
                     @ended="() => {
@@ -209,6 +209,10 @@
             }" />
             <div x-ref="timer" class="font-mono text-sm border border-slate-500 rounded-lg px-1 py-0.5 shrink-0">0:00 /
                 0:00
+            </div>
+            <div x-show="dygraph" class="font-mono text-sm border border-slate-500 rounded-lg px-1 py-0.5 shrink-0"
+                x-text="`frame_${String(videoFrameIndex).padStart(6, '0')} / frame_${String(dygraph ? Math.max(dygraph.numRows() - 1, 0) : 0).padStart(6, '0')}`">
+                frame_000000
             </div>
         </div>
         {% endif %}
@@ -301,6 +305,7 @@
                 checked: [],
                 dygraphTime: 0.0,
                 dygraphIndex: 0,
+                videoFrameIndex: 0,
                 videos: null,
                 video: null,
                 colors: null,
@@ -309,7 +314,7 @@
                 videoCodecError: false,
                 isVideosDropdownOpen: false,
                 videosKeys: {{ videos_info | map(attribute='filename') | list | tojson }},
-                videosKeysSelected: [],
+                videosKeysSelected: {{ default_video_keys_selected | tojson }},
                 fps: {{ dataset_info.fps }},
                 columns: {{ columns | tojson }},
 
@@ -323,8 +328,6 @@
                             this.videoCodecError = true;
                         }
                     }
-                    this.videosKeysSelected = this.videosKeys.map(opt => opt)
-
                     // process CSV data
                     const csvDataStr = {{ episode_data_csv_str|tojson|safe }};
                     // Create a Blob with the CSV data
@@ -507,10 +510,11 @@
                     const pc = (100 / this.video.duration) * time;
                     this.$refs.slider.value = pc;
                     this.dygraphTime = time;
-                    this.dygraphIndex = Math.min(
+                    this.videoFrameIndex = Math.min(
                         Math.floor(pc * this.dygraph.numRows() / 100),
                         this.dygraph.numRows() - 1,
                     );
+                    this.dygraphIndex = this.videoFrameIndex;
                     this.dygraph.setSelection(this.dygraphIndex, undefined, true, true);
                     this.$refs.timer.textContent =
                         this.formatTime(time) + ' / ' + this.formatTime(this.video.duration);

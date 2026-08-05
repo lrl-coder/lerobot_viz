@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import csv
+import sys
 from io import StringIO
 from pathlib import Path
 
@@ -29,13 +30,16 @@ from lerobot.datasets.utils import IterableNamespace
 from lerobot.scripts.visualize_dataset_html import (
     colorize_depth_frame,
     disable_browser_cache,
+    get_default_video_keys_selected,
     get_depth_episode_path,
     get_depth_keys,
     get_episode_data,
     get_generated_video_cache_dir,
+    get_local_repo_id,
     get_raw_image_frame_paths,
+    get_repo_route_parts,
     get_rgb_key_for_depth,
-    insert_depth_videos_next_to_rgb,
+    place_depth_videos_below_rgb,
     visualize_dataset_html,
 )
 
@@ -103,6 +107,53 @@ def test_disable_browser_cache_sets_no_store_headers():
     assert response.cache_control.must_revalidate
     assert response.headers["Pragma"] == "no-cache"
     assert response.headers["Expires"] == "0"
+
+
+def test_local_repo_id_uses_dataset_root_directory_name():
+    root = Path("/datasets/session_20260805_091643")
+
+    assert get_local_repo_id(root) == "session_20260805_091643"
+    assert get_repo_route_parts("session_20260805_091643") == (
+        "local",
+        "session_20260805_091643",
+    )
+    assert get_repo_route_parts("owner/dataset") == ("owner", "dataset")
+
+
+def test_main_infers_repo_id_from_root_name(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeLeRobotDataset:
+        def __init__(self, repo_id, **kwargs):
+            captured["repo_id"] = repo_id
+            captured["root"] = kwargs["root"]
+
+    monkeypatch.setattr(visualize_module, "LeRobotDataset", FakeLeRobotDataset)
+    monkeypatch.setattr(
+        visualize_module,
+        "visualize_dataset_html",
+        lambda dataset, **_kwargs: captured.update({"dataset": dataset}),
+    )
+    dataset_root = tmp_path / "session_20260805_091643"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "visualize_dataset_html",
+            "--repo-id",
+            "ignored/old-name",
+            "--root",
+            str(dataset_root),
+            "--serve",
+            "0",
+        ],
+    )
+
+    visualize_module.main()
+
+    assert captured["repo_id"] == "session_20260805_091643"
+    assert captured["root"] == dataset_root
+    assert isinstance(captured["dataset"], FakeLeRobotDataset)
 
 
 def test_get_depth_episode_path_defaults_to_video_depth_and_allows_override(tmp_path):
@@ -209,6 +260,7 @@ def test_template_renders_generated_video_for_image_dataset():
                     "generated": True,
                 }
             ],
+            default_video_keys_selected=["observation.image"],
             has_generated_videos=True,
             check_video_codec=False,
             language_instruction=["Do the task."],
@@ -218,20 +270,28 @@ def test_template_renders_generated_video_for_image_dataset():
         )
 
     assert "<video" in page
+    assert "muted autoplay playsinline loop" in page
     assert "filter videos" in page
     assert "/local/no_video/episode_0/image-video/observation.image" in page
     assert "generates and caches H.264 videos" in page
     assert "Language Instruction:" in page
     assert "Do the task." in page
     assert "nVideos: 1" in page
-    assert "grid grid-cols-4" in page
+    assert 'videosKeysSelected: ["observation.image"]' in page
+    assert "this.videosKeysSelected = this.videosKeys.map" not in page
+    assert "grid grid-cols-1 lg:grid-cols-2" in page
+    assert "w-full min-w-0 relative" in page
+    assert "w-full h-auto max-h-[70vh]" in page
     assert "this.checked = Array(this.colors.length).fill(false)" in page
     assert "this.dygraph.setVisibility(this.checked)" in page
     assert "this.colors.length).fill(false)" in page
+    assert "frame_${String(videoFrameIndex).padStart(6, '0')}" in page
+    assert "videoFrameIndex: 0" in page
+    assert "this.dygraphIndex = this.videoFrameIndex" in page
     assert "x-show='!videoCodecError && videosKeysSelected.includes(\"observation.image\")'" in page
 
 
-def test_depth_streams_are_matched_and_placed_next_to_rgb():
+def test_depth_streams_are_matched_and_placed_below_rgb():
     rgb_videos = [
         {"camera_key": "observation.images.third_view"},
         {"camera_key": "observation.images.wrist"},
@@ -247,12 +307,12 @@ def test_depth_streams_are_matched_and_placed_next_to_rgb():
         },
     ]
 
-    ordered = insert_depth_videos_next_to_rgb(rgb_videos, depth_videos)
+    ordered = place_depth_videos_below_rgb(rgb_videos, depth_videos)
 
     assert [video["camera_key"] for video in ordered] == [
         "observation.images.third_view",
-        "observation.images.depth.third_view",
         "observation.images.wrist",
+        "observation.images.depth.third_view",
         "observation.images.depth.wrist",
     ]
     assert (
@@ -262,6 +322,20 @@ def test_depth_streams_are_matched_and_placed_next_to_rgb():
         )
         == "observation.images.third_view"
     )
+
+
+def test_depth_videos_are_not_selected_by_default():
+    videos_info = [
+        {"filename": "observation.images.third_view"},
+        {"filename": "observation.images.wrist", "is_depth": False},
+        {"filename": "observation.images.depth.third_view", "is_depth": True},
+        {"filename": "observation.images.depth.wrist", "is_depth": True},
+    ]
+
+    assert get_default_video_keys_selected(videos_info) == [
+        "observation.images.third_view",
+        "observation.images.wrist",
+    ]
 
 
 def test_colorize_depth_frame_uses_black_for_invalid_depth():

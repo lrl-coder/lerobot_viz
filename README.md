@@ -42,22 +42,25 @@ uv pip install \
 
 ## 3. 运行
 
-将 `/path/to/dataset` 替换为本地数据集目录，将 `dataset_name` 替换为数据集名称：
+将 `/path/to/session_name` 替换为本地数据集目录：
 
 ```bash
 source .venv/bin/activate
 
 PYTHONPATH="$PWD/lerobot-src-v0.3.3/src" python -m lerobot.scripts.visualize_dataset_html \
-  --repo-id local/dataset_name \
-  --root /path/to/dataset \
+  --root /path/to/session_name \
   --host 0.0.0.0 \
   --port 9090
 ```
 
+本地模式会自动取 `--root` 的最后一级目录名作为 repo id。例如
+`--root /root/autodl-tmp/single_left_ft300s/session_20260805_091643` 对应的 repo id 为
+`session_20260805_091643`，无需再传 `--repo-id`。
+
 浏览器打开：
 
 ```text
-http://服务器IP:9090/local/dataset_name/episode_0
+http://服务器IP:9090/local/session_name/episode_0
 ```
 
 如果数据集目录下存在 `video/depth/episode_XXXXXX.h5`，页面会自动读取其中形如

@@ -108,6 +108,25 @@ def get_generated_video_cache_dir(dataset_root: Path | None, static_dir: Path) -
     return Path(static_dir) / "generated-videos"
 
 
+def get_local_repo_id(dataset_root: Path) -> str:
+    """Use the final directory component as the local dataset repo id."""
+    repo_id = Path(dataset_root).resolve().name
+    if not repo_id:
+        raise ValueError(f"Cannot derive a repo id from dataset root {dataset_root!s}.")
+    return repo_id
+
+
+def get_repo_route_parts(repo_id: str) -> tuple[str, str]:
+    """Map a single-component local repo id onto the existing two-part routes."""
+    normalized_repo_id = repo_id.strip("/")
+    if not normalized_repo_id:
+        raise ValueError("The repo id cannot be empty.")
+    if "/" not in normalized_repo_id:
+        return "local", normalized_repo_id
+    namespace, dataset_name = normalized_repo_id.rsplit("/", 1)
+    return namespace, dataset_name
+
+
 def _require_h5py():
     try:
         import h5py
@@ -153,20 +172,26 @@ def get_rgb_key_for_depth(depth_key: str, rgb_keys: list[str]) -> str | None:
     return next((key for key in rgb_keys if key.endswith(suffix)), None)
 
 
-def insert_depth_videos_next_to_rgb(videos_info: list[dict], depth_videos_info: list[dict]) -> list[dict]:
-    """Insert each depth video immediately after its matching RGB video."""
+def place_depth_videos_below_rgb(videos_info: list[dict], depth_videos_info: list[dict]) -> list[dict]:
+    """Place depth videos after RGB videos while preserving matching camera order."""
     depth_by_rgb = {info.get("rgb_key"): info for info in depth_videos_info if info.get("rgb_key")}
-    ordered_videos = []
+    ordered_depth_videos = []
     inserted_depth_keys = set()
     for video_info in videos_info:
-        ordered_videos.append(video_info)
         depth_info = depth_by_rgb.get(video_info.get("camera_key"))
         if depth_info is not None:
-            ordered_videos.append(depth_info)
+            ordered_depth_videos.append(depth_info)
             inserted_depth_keys.add(depth_info["camera_key"])
 
-    ordered_videos.extend(info for info in depth_videos_info if info["camera_key"] not in inserted_depth_keys)
-    return ordered_videos
+    ordered_depth_videos.extend(
+        info for info in depth_videos_info if info["camera_key"] not in inserted_depth_keys
+    )
+    return [*videos_info, *ordered_depth_videos]
+
+
+def get_default_video_keys_selected(videos_info: list[dict]) -> list[str]:
+    """Select RGB videos by default while leaving depth videos hidden."""
+    return [info["filename"] for info in videos_info if not info.get("is_depth", False)]
 
 
 def get_raw_image_frame_paths(dataset_root: Path, episode_id: int, camera_key: str) -> list[Path]:
@@ -710,7 +735,7 @@ def run_server(
     @app.route("/")
     def hommepage(dataset=dataset):
         if dataset:
-            dataset_namespace, dataset_name = dataset.repo_id.split("/")
+            dataset_namespace, dataset_name = get_repo_route_parts(dataset.repo_id)
             return redirect(
                 url_for(
                     "show_episode",
@@ -728,7 +753,7 @@ def run_server(
             episode_param = int(all_params["episode"])
 
         if dataset_param:
-            dataset_namespace, dataset_name = dataset_param.split("/")
+            dataset_namespace, dataset_name = get_repo_route_parts(dataset_param)
             return redirect(
                 url_for(
                     "show_episode",
@@ -771,10 +796,10 @@ def run_server(
         image_key,
         dataset=dataset,
     ):
-        repo_id = f"{dataset_namespace}/{dataset_name}"
+        route_parts = (dataset_namespace, dataset_name)
         if (
             not isinstance(dataset, LeRobotDataset)
-            or dataset.repo_id != repo_id
+            or get_repo_route_parts(dataset.repo_id) != route_parts
             or image_key not in dataset.meta.image_keys
         ):
             abort(404)
@@ -797,10 +822,10 @@ def run_server(
         camera_key,
         dataset=dataset,
     ):
-        repo_id = f"{dataset_namespace}/{dataset_name}"
+        route_parts = (dataset_namespace, dataset_name)
         if (
             not isinstance(dataset, LeRobotDataset)
-            or dataset.repo_id != repo_id
+            or get_repo_route_parts(dataset.repo_id) != route_parts
             or camera_key not in dataset.meta.video_keys
             or not get_raw_image_frame_paths(dataset.root, episode_id, camera_key)
         ):
@@ -824,8 +849,11 @@ def run_server(
         depth_key,
         dataset=dataset,
     ):
-        repo_id = f"{dataset_namespace}/{dataset_name}"
-        if not isinstance(dataset, LeRobotDataset) or dataset.repo_id != repo_id:
+        route_parts = (dataset_namespace, dataset_name)
+        if (
+            not isinstance(dataset, LeRobotDataset)
+            or get_repo_route_parts(dataset.repo_id) != route_parts
+        ):
             abort(404)
 
         depth_path = get_depth_episode_path(dataset.root, episode_id, depth_dir)
@@ -842,10 +870,13 @@ def run_server(
 
     @app.route("/<string:dataset_namespace>/<string:dataset_name>/episode_<int:episode_id>")
     def show_episode(dataset_namespace, dataset_name, episode_id, dataset=dataset, episodes=episodes):
-        repo_id = f"{dataset_namespace}/{dataset_name}"
+        route_repo_id = f"{dataset_namespace}/{dataset_name}"
+        route_parts = (dataset_namespace, dataset_name)
+        if dataset is not None and get_repo_route_parts(dataset.repo_id) != route_parts:
+            abort(404)
         try:
             if dataset is None:
-                dataset = get_dataset_info(repo_id)
+                dataset = get_dataset_info(route_repo_id)
         except FileNotFoundError:
             return (
                 "Make sure to convert your LeRobotDataset to v2 & above. See how to convert your dataset at https://github.com/huggingface/lerobot/pull/461",
@@ -861,8 +892,9 @@ def run_server(
                 return "Make sure to convert your LeRobotDataset to v2 & above."
 
         episode_data_csv_str, columns, ignored_columns = get_episode_data(dataset, episode_id)
+        repo_id = dataset.repo_id
         dataset_info = {
-            "repo_id": f"{dataset_namespace}/{dataset_name}",
+            "repo_id": repo_id,
             "num_samples": dataset.num_frames
             if isinstance(dataset, LeRobotDataset)
             else dataset.total_frames,
@@ -948,7 +980,7 @@ def run_server(
                             "is_depth": True,
                         }
                     )
-                videos_info = insert_depth_videos_next_to_rgb(videos_info, depth_videos_info)
+                videos_info = place_depth_videos_below_rgb(videos_info, depth_videos_info)
 
             has_generated_videos = any(info["generated"] for info in videos_info)
             tasks = dataset.meta.episodes[episode_id]["tasks"]
@@ -990,6 +1022,7 @@ def run_server(
             episodes=episodes,
             dataset_info=dataset_info,
             videos_info=videos_info,
+            default_video_keys_selected=get_default_video_keys_selected(videos_info),
             has_generated_videos=has_generated_videos,
             check_video_codec=check_video_codec,
             language_instruction=tasks,
@@ -1204,7 +1237,10 @@ def main():
         "--repo-id",
         type=str,
         default=None,
-        help="Name of hugging face repositery containing a LeRobotDataset dataset (e.g. `lerobot/pusht` for https://huggingface.co/datasets/lerobot/pusht).",
+        help=(
+            "Hugging Face dataset repository id. In local mode --root takes precedence and the repo id "
+            "is inferred from the final directory name."
+        ),
     )
     parser.add_argument(
         "--root",
@@ -1286,6 +1322,9 @@ def main():
     root = kwargs.pop("root")
     tolerance_s = kwargs.pop("tolerance_s")
     episodes = kwargs.get("episodes")
+
+    if root is not None and not load_from_hf_hub:
+        repo_id = get_local_repo_id(root)
 
     dataset = None
     if repo_id:
