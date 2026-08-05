@@ -283,7 +283,19 @@ def test_template_renders_generated_video_for_image_dataset():
     assert "grid grid-cols-1 lg:grid-cols-2" in page
     assert "w-full min-w-0 relative" in page
     assert "w-full h-auto max-h-[70vh]" in page
-    assert "this.checked = Array(this.colors.length).fill(false)" in page
+    assert "seriesKey => compatibleGraphSeries.includes(seriesKey)" in page
+    assert "@click=\"toggleVideoSelection(option)\"" in page
+    assert "\"lerobot-viz:preferences:v2\"" in page
+    assert "legacyPreferencesStorageKey: \"lerobot-viz:preferences:v1\"" in page
+    assert "this.loadPreferences();" in page
+    assert "window.localStorage.getItem(this.preferencesStorageKey)" in page
+    assert "window.localStorage.setItem(this.preferencesStorageKey" in page
+    assert "preferences.version !== expectedVersion" in page
+    assert "compatibleVideoKeys.length > 0" in page
+    assert "!isLegacyPreferences" in page
+    assert "value => JSON.stringify([column.key, value])" in page
+    assert "this.graphSeriesSelected = this.graphSeriesKeys.filter" in page
+    assert "seriesKeys.length === this.colors.length" in page
     assert "this.dygraph.setVisibility(this.checked)" in page
     assert "this.colors.length).fill(false)" in page
     assert "frame_${String(videoFrameIndex).padStart(6, '0')}" in page

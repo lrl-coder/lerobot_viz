@@ -136,7 +136,7 @@
             <div>
                 <template x-for="option in videosKeys" :key="option">
                 <div
-                    @click="videosKeysSelected = videosKeysSelected.includes(option) ? videosKeysSelected.filter(v => v !== option) : [...videosKeysSelected, option]"
+                    @click="toggleVideoSelection(option)"
                     class="p-2 cursor-pointer bg-slate-900"
                     :class="{ 'bg-slate-700': videosKeysSelected.includes(option) }"
                     x-text="option"
@@ -315,11 +315,16 @@
                 isVideosDropdownOpen: false,
                 videosKeys: {{ videos_info | map(attribute='filename') | list | tojson }},
                 videosKeysSelected: {{ default_video_keys_selected | tojson }},
+                graphSeriesSelected: [],
+                preferencesStorageKey: "lerobot-viz:preferences:v2",
+                legacyPreferencesStorageKey: "lerobot-viz:preferences:v1",
                 fps: {{ dataset_info.fps }},
                 columns: {{ columns | tojson }},
 
                 // alpine initialization
                 init() {
+                    this.loadPreferences();
+
                     // check if videos can play
                     if (this.nVideos > 0 && {{ check_video_codec | tojson }}) {
                         const dummyVideo = document.createElement('video');
@@ -357,7 +362,19 @@
                                 // dygraph initialization
                                 this.dygraph.setSelection(this.dygraphIndex, undefined, true, true);
                                 this.colors = this.dygraph.getColors();
-                                this.checked = Array(this.colors.length).fill(false);
+                                const seriesKeys = this.graphSeriesKeys;
+                                if (seriesKeys.length === this.colors.length) {
+                                    const compatibleGraphSeries = this.graphSeriesSelected.filter(
+                                        seriesKey => seriesKeys.includes(seriesKey),
+                                    );
+                                    this.checked = seriesKeys.map(
+                                        seriesKey => compatibleGraphSeries.includes(seriesKey),
+                                    );
+                                    this.graphSeriesSelected = compatibleGraphSeries;
+                                } else {
+                                    this.checked = Array(this.colors.length).fill(false);
+                                    this.graphSeriesSelected = [];
+                                }
 
                                 const colors = [];
                                 let lightness = 30; // const LIGHTNESS = [30, 65, 85]; // state_lightness, action_lightness, pred_action_lightness
@@ -394,6 +411,69 @@
                 },
 
                 //#region Table Data
+
+                get graphSeriesKeys() {
+                    return this.columns.flatMap(column => column.value.map(
+                        value => JSON.stringify([column.key, value]),
+                    ));
+                },
+
+                loadPreferences() {
+                    try {
+                        let storedPreferences = window.localStorage.getItem(this.preferencesStorageKey);
+                        let isLegacyPreferences = false;
+                        if (!storedPreferences) {
+                            storedPreferences = window.localStorage.getItem(this.legacyPreferencesStorageKey);
+                            isLegacyPreferences = Boolean(storedPreferences);
+                        }
+                        if (!storedPreferences) return;
+
+                        const preferences = JSON.parse(storedPreferences);
+                        const expectedVersion = isLegacyPreferences ? 1 : 2;
+                        if (!preferences || preferences.version !== expectedVersion) return;
+
+                        if (
+                            Array.isArray(preferences.videosKeysSelected)
+                            && preferences.videosKeysSelected.every(key => typeof key === "string")
+                        ) {
+                            const compatibleVideoKeys = preferences.videosKeysSelected.filter(
+                                key => this.videosKeys.includes(key),
+                            );
+                            if (preferences.videosKeysSelected.length === 0 || compatibleVideoKeys.length > 0) {
+                                this.videosKeysSelected = compatibleVideoKeys;
+                            }
+                        }
+                        if (
+                            !isLegacyPreferences
+                            && Array.isArray(preferences.graphSeriesSelected)
+                            && preferences.graphSeriesSelected.every(label => typeof label === "string")
+                        ) {
+                            this.graphSeriesSelected = preferences.graphSeriesSelected;
+                        }
+                        if (isLegacyPreferences) this.savePreferences();
+                    } catch (error) {
+                        console.warn("Unable to load visualizer preferences from localStorage.", error);
+                    }
+                },
+
+                savePreferences() {
+                    try {
+                        window.localStorage.setItem(this.preferencesStorageKey, JSON.stringify({
+                            version: 2,
+                            videosKeysSelected: this.videosKeysSelected,
+                            graphSeriesSelected: this.graphSeriesSelected,
+                        }));
+                    } catch (error) {
+                        console.warn("Unable to save visualizer preferences to localStorage.", error);
+                    }
+                },
+
+                toggleVideoSelection(option) {
+                    this.videosKeysSelected = this.videosKeysSelected.includes(option)
+                        ? this.videosKeysSelected.filter(value => value !== option)
+                        : [...this.videosKeysSelected, option];
+                    this.savePreferences();
+                },
 
                 // turn dygraph's 1D data (at a given time t) to 2D data that whose columns names are defined in this.columnNames.
                 // 2d data view is used to create html table element.
@@ -460,8 +540,9 @@
                     // slice(1) to remove the timestamp point that we do not need
                     const labels = this.dygraph.getLabels().slice(1);
                     const values = this.dygraph.rawData_[index].slice(1);
-                    const checkedNew = this.currentFrameData ? this.currentFrameData.map(cell => cell.checked) : Array(
-                        this.colors.length).fill(false);
+                    const checkedNew = this.currentFrameData
+                        ? this.currentFrameData.map(cell => cell.checked)
+                        : [...this.checked];
                     this.currentFrameData = labels.map((label, idx) => ({
                         label,
                         value: values[idx],
@@ -472,6 +553,10 @@
                     if (shouldUpdateVisibility) {
                         this.checked = checkedNew;
                         this.dygraph.setVisibility(this.checked);
+                        this.graphSeriesSelected = this.graphSeriesKeys.filter(
+                            (_, index) => this.checked[index],
+                        );
+                        this.savePreferences();
                     }
                 },
 
