@@ -114,12 +114,6 @@
             </ul>
         </div>
 
-        {% if has_generated_videos %}
-        <div class="text-sm text-amber-400" x-show="nVideoReadyToPlay < nVideos">
-            The first load generates and caches H.264 videos on the server. Please wait…
-        </div>
-        {% endif %}
-
         <!-- Videos -->
         <div  class="max-w-32 relative text-sm mb-4 select-none"
             @click.outside="isVideosDropdownOpen = false">

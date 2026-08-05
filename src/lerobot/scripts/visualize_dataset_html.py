@@ -108,6 +108,71 @@ def get_generated_video_cache_dir(dataset_root: Path | None, static_dir: Path) -
     return Path(static_dir) / "generated-videos"
 
 
+def get_episodes_to_cache(dataset: LeRobotDataset, episodes: list[int] | None) -> list[int]:
+    """Return the real episode ids represented by the loaded dataset."""
+    if episodes is not None:
+        return list(episodes)
+    if dataset.episodes is not None:
+        return list(dataset.episodes)
+    return list(range(dataset.num_episodes))
+
+
+def precompute_generated_video_cache(
+    dataset: LeRobotDataset,
+    episodes: list[int] | None,
+    depth_dir: Path | None,
+    generate_image_video,
+    generate_raw_image_video,
+    generate_depth_video,
+) -> int:
+    """Create every derived video before accepting browser requests.
+
+    The generation functions are responsible for atomically creating missing files and
+    returning immediately when their persistent cache file already exists.
+    """
+    episode_ids = get_episodes_to_cache(dataset, episodes)
+    artifact_count = 0
+    logging.info("Preparing generated-video cache for %s episode(s)", len(episode_ids))
+
+    for position, episode_id in enumerate(episode_ids, start=1):
+        logging.info(
+            "Preparing generated videos for episode %s (%s/%s)",
+            episode_id,
+            position,
+            len(episode_ids),
+        )
+        for image_key in dataset.meta.image_keys:
+            generate_image_video(episode_id, image_key)
+            artifact_count += 1
+
+        for camera_key in dataset.meta.video_keys:
+            source_video_path = dataset.root / dataset.meta.get_video_file_path(episode_id, camera_key)
+            if source_video_path.is_file():
+                continue
+            if get_raw_image_frame_paths(dataset.root, episode_id, camera_key):
+                generate_raw_image_video(episode_id, camera_key)
+                artifact_count += 1
+            else:
+                logging.warning(
+                    "Skipping missing camera stream %s for episode %s: no MP4 or raw frames found",
+                    camera_key,
+                    episode_id,
+                )
+
+        depth_path = get_depth_episode_path(dataset.root, episode_id, depth_dir)
+        if depth_path.is_file():
+            for depth_key in get_depth_keys(depth_path):
+                generate_depth_video(episode_id, depth_key)
+                artifact_count += 1
+
+    logging.info(
+        "Generated-video cache is ready: %s derived video(s) available for %s episode(s)",
+        artifact_count,
+        len(episode_ids),
+    )
+    return artifact_count
+
+
 def get_local_repo_id(dataset_root: Path) -> str:
     """Use the final directory component as the local dataset repo id."""
     repo_id = Path(dataset_root).resolve().name
@@ -318,6 +383,16 @@ def run_server(
             / f"chunk-{chunk:03d}"
             / safe_camera_key
             / f"episode_{episode_id:06d}.mp4"
+        )
+
+    def get_cached_depth_keys(episode_id: int) -> list[str]:
+        chunk = episode_id // dataset.meta.chunks_size
+        episode_filename = f"episode_{episode_id:06d}.mp4"
+        chunk_dir = generated_videos_folder / "depth" / f"chunk-{chunk:03d}"
+        return sorted(
+            video_path.parent.name
+            for video_path in chunk_dir.glob(f"*/{episode_filename}")
+            if video_path.is_file()
         )
 
     def encode_video_with_ffmpeg(
@@ -804,7 +879,10 @@ def run_server(
         ):
             abort(404)
 
-        video_path = generate_image_video(episode_id, image_key)
+        get_episode_position(episode_id)
+        video_path = get_image_video_path(episode_id, image_key)
+        if not video_path.is_file():
+            abort(404)
         return send_file(
             video_path,
             mimetype="video/mp4",
@@ -827,11 +905,13 @@ def run_server(
             not isinstance(dataset, LeRobotDataset)
             or get_repo_route_parts(dataset.repo_id) != route_parts
             or camera_key not in dataset.meta.video_keys
-            or not get_raw_image_frame_paths(dataset.root, episode_id, camera_key)
         ):
             abort(404)
 
-        video_path = generate_raw_image_video(episode_id, camera_key)
+        get_episode_position(episode_id)
+        video_path = get_raw_image_video_path(episode_id, camera_key)
+        if not video_path.is_file():
+            abort(404)
         return send_file(
             video_path,
             mimetype="video/mp4",
@@ -853,14 +933,14 @@ def run_server(
         if (
             not isinstance(dataset, LeRobotDataset)
             or get_repo_route_parts(dataset.repo_id) != route_parts
+            or not depth_key.startswith(DEPTH_KEY_PREFIX)
         ):
             abort(404)
 
-        depth_path = get_depth_episode_path(dataset.root, episode_id, depth_dir)
-        if not depth_path.is_file() or depth_key not in get_depth_keys(depth_path):
+        get_episode_position(episode_id)
+        video_path = get_depth_video_path(episode_id, depth_key)
+        if not video_path.is_file():
             abort(404)
-
-        video_path = generate_depth_video(episode_id, depth_key)
         return send_file(
             video_path,
             mimetype="video/mp4",
@@ -903,7 +983,6 @@ def run_server(
             else dataset.total_episodes,
             "fps": dataset.fps,
         }
-        has_generated_videos = False
         check_video_codec = False
         if isinstance(dataset, LeRobotDataset):
             videos_info = []
@@ -921,7 +1000,7 @@ def run_server(
                             "generated": False,
                         }
                     )
-                elif get_raw_image_frame_paths(dataset.root, episode_id, key):
+                elif get_raw_image_video_path(episode_id, key).is_file():
                     videos_info.append(
                         {
                             "url": url_for(
@@ -944,45 +1023,49 @@ def run_server(
                     )
             check_video_codec = any(not info["generated"] for info in videos_info)
             for image_key in dataset.meta.image_keys:
-                videos_info.append(
-                    {
-                        "url": url_for(
-                            "show_image_video",
-                            dataset_namespace=dataset_namespace,
-                            dataset_name=dataset_name,
-                            episode_id=episode_id,
-                            image_key=image_key,
-                        ),
-                        "filename": image_key,
-                        "camera_key": image_key,
-                        "generated": True,
-                    }
-                )
-
-            depth_path = get_depth_episode_path(dataset.root, episode_id, depth_dir)
-            depth_videos_info = []
-            if depth_path.is_file():
-                rgb_keys = list(dataset.meta.camera_keys)
-                for depth_key in get_depth_keys(depth_path):
-                    depth_videos_info.append(
+                if get_image_video_path(episode_id, image_key).is_file():
+                    videos_info.append(
                         {
                             "url": url_for(
-                                "show_depth_video",
+                                "show_image_video",
                                 dataset_namespace=dataset_namespace,
                                 dataset_name=dataset_name,
                                 episode_id=episode_id,
-                                depth_key=depth_key,
+                                image_key=image_key,
                             ),
-                            "filename": depth_key,
-                            "camera_key": depth_key,
-                            "rgb_key": get_rgb_key_for_depth(depth_key, rgb_keys),
+                            "filename": image_key,
+                            "camera_key": image_key,
                             "generated": True,
-                            "is_depth": True,
                         }
                     )
-                videos_info = place_depth_videos_below_rgb(videos_info, depth_videos_info)
+                else:
+                    logging.warning(
+                        "Skipping missing generated image video %s for episode %s",
+                        image_key,
+                        episode_id,
+                    )
 
-            has_generated_videos = any(info["generated"] for info in videos_info)
+            depth_videos_info = []
+            rgb_keys = list(dataset.meta.camera_keys)
+            for depth_key in get_cached_depth_keys(episode_id):
+                depth_videos_info.append(
+                    {
+                        "url": url_for(
+                            "show_depth_video",
+                            dataset_namespace=dataset_namespace,
+                            dataset_name=dataset_name,
+                            episode_id=episode_id,
+                            depth_key=depth_key,
+                        ),
+                        "filename": depth_key,
+                        "camera_key": depth_key,
+                        "rgb_key": get_rgb_key_for_depth(depth_key, rgb_keys),
+                        "generated": True,
+                        "is_depth": True,
+                    }
+                )
+            videos_info = place_depth_videos_below_rgb(videos_info, depth_videos_info)
+
             tasks = dataset.meta.episodes[episode_id]["tasks"]
         else:
             video_keys = [key for key, ft in dataset.features.items() if ft["dtype"] == "video"]
@@ -1023,12 +1106,21 @@ def run_server(
             dataset_info=dataset_info,
             videos_info=videos_info,
             default_video_keys_selected=get_default_video_keys_selected(videos_info),
-            has_generated_videos=has_generated_videos,
             check_video_codec=check_video_codec,
             language_instruction=tasks,
             episode_data_csv_str=episode_data_csv_str,
             columns=columns,
             ignored_columns=ignored_columns,
+        )
+
+    if isinstance(dataset, LeRobotDataset):
+        precompute_generated_video_cache(
+            dataset=dataset,
+            episodes=episodes,
+            depth_dir=depth_dir,
+            generate_image_video=generate_image_video,
+            generate_raw_image_video=generate_raw_image_video,
+            generate_depth_video=generate_depth_video,
         )
 
     app.run(host=host, port=port)
@@ -1163,6 +1255,7 @@ def visualize_dataset_html(
     host: str = "127.0.0.1",
     port: int = 9090,
     force_override: bool = False,
+    rebuild_cache: bool = False,
 ) -> Path | None:
     init_logging()
 
@@ -1185,13 +1278,14 @@ def visualize_dataset_html(
     static_dir.mkdir(parents=True, exist_ok=True)
     dataset_root = dataset.root if isinstance(dataset, LeRobotDataset) else None
     generated_videos_dir = get_generated_video_cache_dir(dataset_root, static_dir)
-    if generated_videos_dir.is_symlink() or generated_videos_dir.is_file():
-        generated_videos_dir.unlink()
-    elif generated_videos_dir.is_dir():
-        shutil.rmtree(generated_videos_dir)
-    logging.info(
-        "Local generated-video cache starts empty for this process: %s", generated_videos_dir
-    )
+    if rebuild_cache:
+        if generated_videos_dir.is_symlink() or generated_videos_dir.is_file():
+            generated_videos_dir.unlink()
+        elif generated_videos_dir.is_dir():
+            shutil.rmtree(generated_videos_dir)
+        logging.info("Removed generated-video cache: %s", generated_videos_dir)
+    generated_videos_dir.mkdir(parents=True, exist_ok=True)
+    logging.info("Using persistent generated-video cache: %s", generated_videos_dir)
 
     if dataset is None:
         if serve:
@@ -1302,6 +1396,15 @@ def main():
         type=int,
         default=0,
         help="Delete the output directory if it exists already.",
+    )
+    parser.add_argument(
+        "--rebuild-cache",
+        type=int,
+        default=0,
+        help=(
+            "Delete and regenerate ROOT/.lerobot-viz-cache/generated-videos before serving. "
+            "By default, generated videos persist across program runs."
+        ),
     )
 
     parser.add_argument(

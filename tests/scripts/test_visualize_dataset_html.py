@@ -18,6 +18,7 @@ import csv
 import sys
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -34,17 +35,19 @@ from lerobot.scripts.visualize_dataset_html import (
     get_depth_episode_path,
     get_depth_keys,
     get_episode_data,
+    get_episodes_to_cache,
     get_generated_video_cache_dir,
     get_local_repo_id,
     get_raw_image_frame_paths,
     get_repo_route_parts,
     get_rgb_key_for_depth,
     place_depth_videos_below_rgb,
+    precompute_generated_video_cache,
     visualize_dataset_html,
 )
 
 
-def test_visualize_dataset_html_clears_only_generated_video_cache_on_start(tmp_path):
+def test_visualize_dataset_html_preserves_generated_video_cache_on_start(tmp_path):
     output_dir = tmp_path / "output"
     generated_video = output_dir / "static" / "generated-videos" / "depth" / "stale.mp4"
     generated_video.parent.mkdir(parents=True)
@@ -54,11 +57,11 @@ def test_visualize_dataset_html_clears_only_generated_video_cache_on_start(tmp_p
 
     visualize_dataset_html(dataset=None, output_dir=output_dir, serve=False)
 
-    assert not generated_video.parent.parent.exists()
+    assert generated_video.is_file()
     assert preserved_file.is_file()
 
 
-def test_visualize_dataset_html_clears_local_cache_under_dataset_root(tmp_path, monkeypatch):
+def test_visualize_dataset_html_preserves_local_cache_under_dataset_root(tmp_path, monkeypatch):
     class FakeLeRobotDataset:
         def __init__(self, root):
             self.root = root
@@ -84,7 +87,27 @@ def test_visualize_dataset_html_clears_local_cache_under_dataset_root(tmp_path, 
         serve=False,
     )
 
-    assert not generated_video.parent.parent.exists()
+    assert generated_video.is_file()
+    assert preserved_file.is_file()
+
+
+def test_visualize_dataset_html_rebuilds_generated_video_cache_when_requested(tmp_path):
+    output_dir = tmp_path / "output"
+    generated_video = output_dir / "static" / "generated-videos" / "depth" / "stale.mp4"
+    generated_video.parent.mkdir(parents=True)
+    generated_video.touch()
+    preserved_file = output_dir / "static" / "keep.txt"
+    preserved_file.touch()
+
+    visualize_dataset_html(
+        dataset=None,
+        output_dir=output_dir,
+        serve=False,
+        rebuild_cache=True,
+    )
+
+    assert not generated_video.exists()
+    assert generated_video.parent.parent.is_dir()
     assert preserved_file.is_file()
 
 
@@ -96,6 +119,75 @@ def test_generated_video_cache_is_stored_under_local_dataset_root(tmp_path):
         dataset_root / ".lerobot-viz-cache" / "generated-videos"
     )
     assert get_generated_video_cache_dir(None, static_dir) == static_dir / "generated-videos"
+
+
+def test_precompute_generated_video_cache_visits_every_loaded_episode(tmp_path):
+    h5py = pytest.importorskip("h5py")
+
+    class FakeMetadata:
+        image_keys = ["observation.image"]
+        video_keys = ["observation.images.wrist"]
+
+        @staticmethod
+        def get_video_file_path(episode_id, camera_key):
+            return Path("videos") / camera_key / f"episode_{episode_id:06d}.mp4"
+
+    dataset = SimpleNamespace(
+        root=tmp_path,
+        meta=FakeMetadata(),
+        episodes=None,
+        num_episodes=2,
+    )
+    existing_video = dataset.root / dataset.meta.get_video_file_path(
+        0, "observation.images.wrist"
+    )
+    existing_video.parent.mkdir(parents=True)
+    existing_video.touch()
+
+    raw_frames_dir = (
+        dataset.root
+        / "video"
+        / "images"
+        / "observation.images.wrist"
+        / "episode_000001"
+    )
+    raw_frames_dir.mkdir(parents=True)
+    (raw_frames_dir / "frame_000000.png").touch()
+
+    for episode_id in range(2):
+        depth_path = get_depth_episode_path(dataset.root, episode_id)
+        depth_path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(depth_path, "w") as depth_file:
+            depth_file.create_dataset(
+                "observation.images.depth.wrist",
+                data=np.zeros((1, 2, 2), dtype=np.uint16),
+            )
+
+    generated_images = []
+    generated_raw_images = []
+    generated_depth = []
+    artifact_count = precompute_generated_video_cache(
+        dataset=dataset,
+        episodes=None,
+        depth_dir=None,
+        generate_image_video=lambda episode_id, key: generated_images.append((episode_id, key)),
+        generate_raw_image_video=lambda episode_id, key: generated_raw_images.append(
+            (episode_id, key)
+        ),
+        generate_depth_video=lambda episode_id, key: generated_depth.append((episode_id, key)),
+    )
+
+    assert get_episodes_to_cache(dataset, None) == [0, 1]
+    assert generated_images == [
+        (0, "observation.image"),
+        (1, "observation.image"),
+    ]
+    assert generated_raw_images == [(1, "observation.images.wrist")]
+    assert generated_depth == [
+        (0, "observation.images.depth.wrist"),
+        (1, "observation.images.depth.wrist"),
+    ]
+    assert artifact_count == 5
 
 
 def test_disable_browser_cache_sets_no_store_headers():
@@ -261,7 +353,6 @@ def test_template_renders_generated_video_for_image_dataset():
                 }
             ],
             default_video_keys_selected=["observation.image"],
-            has_generated_videos=True,
             check_video_codec=False,
             language_instruction=["Do the task."],
             episode_data_csv_str="timestamp,state_0\r\n0.0,1.0\r\n",
@@ -274,7 +365,7 @@ def test_template_renders_generated_video_for_image_dataset():
     assert "<video muted autoplay playsinline loop" not in page
     assert "filter videos" in page
     assert "/local/no_video/episode_0/image-video/observation.image" in page
-    assert "generates and caches H.264 videos" in page
+    assert "generates and caches H.264 videos" not in page
     assert "Language Instruction:" in page
     assert "Do the task." in page
     assert "nVideos: 1" in page
