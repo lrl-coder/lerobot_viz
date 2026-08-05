@@ -225,6 +225,9 @@ def test_template_renders_generated_video_for_image_dataset():
     assert "Do the task." in page
     assert "nVideos: 1" in page
     assert "grid grid-cols-4" in page
+    assert "this.checked = Array(this.colors.length).fill(false)" in page
+    assert "this.dygraph.setVisibility(this.checked)" in page
+    assert "this.colors.length).fill(false)" in page
     assert "x-show='!videoCodecError && videosKeysSelected.includes(\"observation.image\")'" in page
 
 

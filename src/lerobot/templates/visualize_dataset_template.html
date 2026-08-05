@@ -354,7 +354,7 @@
                                 // dygraph initialization
                                 this.dygraph.setSelection(this.dygraphIndex, undefined, true, true);
                                 this.colors = this.dygraph.getColors();
-                                this.checked = Array(this.colors.length).fill(true);
+                                this.checked = Array(this.colors.length).fill(false);
 
                                 const colors = [];
                                 let lightness = 30; // const LIGHTNESS = [30, 65, 85]; // state_lightness, action_lightness, pred_action_lightness
@@ -369,6 +369,7 @@
 
                                 this.dygraph.updateOptions({ colors });
                                 this.colors = colors;
+                                this.dygraph.setVisibility(this.checked);
 
                                 this.updateTableValues();
 
@@ -457,7 +458,7 @@
                     const labels = this.dygraph.getLabels().slice(1);
                     const values = this.dygraph.rawData_[index].slice(1);
                     const checkedNew = this.currentFrameData ? this.currentFrameData.map(cell => cell.checked) : Array(
-                        this.colors.length).fill(true);
+                        this.colors.length).fill(false);
                     this.currentFrameData = labels.map((label, idx) => ({
                         label,
                         value: values[idx],
