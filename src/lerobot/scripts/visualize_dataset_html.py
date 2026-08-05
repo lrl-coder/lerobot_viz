@@ -57,7 +57,6 @@ import csv
 import json
 import logging
 import re
-import secrets
 import shutil
 import subprocess
 import tempfile
@@ -89,6 +88,24 @@ DEPTH_COLORMAP = np.array(
     ],
     dtype=np.float32,
 )
+
+
+def disable_browser_cache(response):
+    """Prevent visualization responses from being stored by the browser."""
+    response.cache_control.no_store = True
+    response.cache_control.no_cache = True
+    response.cache_control.max_age = 0
+    response.cache_control.must_revalidate = True
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
+def get_generated_video_cache_dir(dataset_root: Path | None, static_dir: Path) -> Path:
+    """Keep local-dataset video cache on disk under the dataset root."""
+    if dataset_root is not None:
+        return Path(dataset_root) / ".lerobot-viz-cache" / "generated-videos"
+    return Path(static_dir) / "generated-videos"
 
 
 def _require_h5py():
@@ -224,14 +241,16 @@ def run_server(
     port: str,
     static_folder: Path,
     template_folder: Path,
+    generated_videos_folder: Path,
     depth_dir: Path | None = None,
 ):
     app = Flask(__name__, static_folder=static_folder.resolve(), template_folder=template_folder.resolve())
-    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # specifying not to cache
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+    app.after_request(disable_browser_cache)
 
     video_generation_locks: dict[Path, Lock] = {}
-    video_cache_version = secrets.token_hex(8)
     video_generation_locks_guard = Lock()
+    generated_videos_folder = Path(generated_videos_folder).resolve()
 
     def get_episode_position(episode_id: int) -> int:
         if dataset.episodes is not None:
@@ -247,8 +266,7 @@ def run_server(
         safe_image_key = re.sub(r"[^A-Za-z0-9_.-]", "_", image_key)
         chunk = episode_id // dataset.meta.chunks_size
         return (
-            Path(app.static_folder)
-            / "generated-videos"
+            generated_videos_folder
             / "embedded-images"
             / f"chunk-{chunk:03d}"
             / safe_image_key
@@ -259,8 +277,7 @@ def run_server(
         safe_depth_key = re.sub(r"[^A-Za-z0-9_.-]", "_", depth_key)
         chunk = episode_id // dataset.meta.chunks_size
         return (
-            Path(app.static_folder)
-            / "generated-videos"
+            generated_videos_folder
             / "depth"
             / f"chunk-{chunk:03d}"
             / safe_depth_key
@@ -271,8 +288,7 @@ def run_server(
         safe_camera_key = re.sub(r"[^A-Za-z0-9_.-]", "_", camera_key)
         chunk = episode_id // dataset.meta.chunks_size
         return (
-            Path(app.static_folder)
-            / "generated-videos"
+            generated_videos_folder
             / "raw-images"
             / f"chunk-{chunk:03d}"
             / safe_camera_key
@@ -768,7 +784,7 @@ def run_server(
             video_path,
             mimetype="video/mp4",
             conditional=True,
-            max_age=31536000,
+            max_age=0,
         )
 
     @app.route(
@@ -795,7 +811,7 @@ def run_server(
             video_path,
             mimetype="video/mp4",
             conditional=True,
-            max_age=31536000,
+            max_age=0,
         )
 
     @app.route(
@@ -821,7 +837,7 @@ def run_server(
             video_path,
             mimetype="video/mp4",
             conditional=True,
-            max_age=31536000,
+            max_age=0,
         )
 
     @app.route("/<string:dataset_namespace>/<string:dataset_name>/episode_<int:episode_id>")
@@ -867,7 +883,6 @@ def run_server(
                             "url": url_for(
                                 "static",
                                 filename=str(video_path).replace("\\", "/"),
-                                v=video_cache_version,
                             ),
                             "filename": video_path.parent.name,
                             "camera_key": key,
@@ -883,7 +898,6 @@ def run_server(
                                 dataset_name=dataset_name,
                                 episode_id=episode_id,
                                 camera_key=key,
-                                v=video_cache_version,
                             ),
                             "filename": key,
                             "camera_key": key,
@@ -904,7 +918,6 @@ def run_server(
                             "show_image_video",
                             dataset_namespace=dataset_namespace,
                             dataset_name=dataset_name,
-                            v=video_cache_version,
                             episode_id=episode_id,
                             image_key=image_key,
                         ),
@@ -927,7 +940,6 @@ def run_server(
                                 dataset_name=dataset_name,
                                 episode_id=episode_id,
                                 depth_key=depth_key,
-                                v=video_cache_version,
                             ),
                             "filename": depth_key,
                             "camera_key": depth_key,
@@ -1138,13 +1150,14 @@ def visualize_dataset_html(
 
     static_dir = output_dir / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
-    generated_videos_dir = static_dir / "generated-videos"
+    dataset_root = dataset.root if isinstance(dataset, LeRobotDataset) else None
+    generated_videos_dir = get_generated_video_cache_dir(dataset_root, static_dir)
     if generated_videos_dir.is_symlink() or generated_videos_dir.is_file():
         generated_videos_dir.unlink()
     elif generated_videos_dir.is_dir():
         shutil.rmtree(generated_videos_dir)
     logging.info(
-        "Generated video cache starts empty for this process: %s", generated_videos_dir
+        "Local generated-video cache starts empty for this process: %s", generated_videos_dir
     )
 
     if dataset is None:
@@ -1156,6 +1169,7 @@ def visualize_dataset_html(
                 port=port,
                 static_folder=static_dir,
                 template_folder=template_dir,
+                generated_videos_folder=generated_videos_dir,
                 depth_dir=None,
             )
     else:
@@ -1171,7 +1185,16 @@ def visualize_dataset_html(
                 ln_videos_dir.symlink_to((dataset.root / "videos").resolve().as_posix())
 
         if serve:
-            run_server(dataset, episodes, host, port, static_dir, template_dir, depth_dir=depth_dir)
+            run_server(
+                dataset,
+                episodes,
+                host,
+                port,
+                static_dir,
+                template_dir,
+                generated_videos_dir,
+                depth_dir=depth_dir,
+            )
 
 
 def main():
@@ -1215,7 +1238,10 @@ def main():
         "--output-dir",
         type=Path,
         default=None,
-        help="Directory path to write html files and kickoff a web server. By default write them to 'outputs/visualize_dataset/REPO_ID'.",
+        help=(
+            "Directory for temporary web-server files. Generated video cache for a local dataset "
+            "is always stored under ROOT/.lerobot-viz-cache."
+        ),
     )
     parser.add_argument(
         "--serve",

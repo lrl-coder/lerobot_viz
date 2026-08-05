@@ -22,13 +22,17 @@ import numpy as np
 import pandas as pd
 import pytest
 from flask import Flask, render_template
+from werkzeug.wrappers import Response
 
+import lerobot.scripts.visualize_dataset_html as visualize_module
 from lerobot.datasets.utils import IterableNamespace
 from lerobot.scripts.visualize_dataset_html import (
     colorize_depth_frame,
+    disable_browser_cache,
     get_depth_episode_path,
     get_depth_keys,
     get_episode_data,
+    get_generated_video_cache_dir,
     get_raw_image_frame_paths,
     get_rgb_key_for_depth,
     insert_depth_videos_next_to_rgb,
@@ -48,6 +52,57 @@ def test_visualize_dataset_html_clears_only_generated_video_cache_on_start(tmp_p
 
     assert not generated_video.parent.parent.exists()
     assert preserved_file.is_file()
+
+
+def test_visualize_dataset_html_clears_local_cache_under_dataset_root(tmp_path, monkeypatch):
+    class FakeLeRobotDataset:
+        def __init__(self, root):
+            self.root = root
+            self.meta = IterableNamespace({"video_keys": []})
+
+    monkeypatch.setattr(visualize_module, "LeRobotDataset", FakeLeRobotDataset)
+    dataset = FakeLeRobotDataset(tmp_path / "dataset")
+    generated_video = (
+        dataset.root
+        / ".lerobot-viz-cache"
+        / "generated-videos"
+        / "depth"
+        / "stale.mp4"
+    )
+    generated_video.parent.mkdir(parents=True)
+    generated_video.touch()
+    preserved_file = dataset.root / ".lerobot-viz-cache" / "keep.txt"
+    preserved_file.touch()
+
+    visualize_dataset_html(
+        dataset=dataset,
+        output_dir=tmp_path / "web-output",
+        serve=False,
+    )
+
+    assert not generated_video.parent.parent.exists()
+    assert preserved_file.is_file()
+
+
+def test_generated_video_cache_is_stored_under_local_dataset_root(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    static_dir = tmp_path / "web-output" / "static"
+
+    assert get_generated_video_cache_dir(dataset_root, static_dir) == (
+        dataset_root / ".lerobot-viz-cache" / "generated-videos"
+    )
+    assert get_generated_video_cache_dir(None, static_dir) == static_dir / "generated-videos"
+
+
+def test_disable_browser_cache_sets_no_store_headers():
+    response = disable_browser_cache(Response())
+
+    assert response.cache_control.no_store
+    assert response.cache_control.no_cache
+    assert response.cache_control.max_age == 0
+    assert response.cache_control.must_revalidate
+    assert response.headers["Pragma"] == "no-cache"
+    assert response.headers["Expires"] == "0"
 
 
 def test_get_depth_episode_path_defaults_to_video_depth_and_allows_override(tmp_path):
