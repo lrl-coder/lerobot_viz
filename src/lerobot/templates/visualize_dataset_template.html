@@ -99,9 +99,14 @@
 
     <!-- Content -->
     <div class="max-h-screen flex flex-col gap-4 overflow-y-auto md:flex-1">
-        <h1 class="text-xl font-bold mt-4 font-mono">
-            Episode {{ episode_id }}
-        </h1>
+        <div class="flex items-center gap-2 mt-4">
+            <h1 class="text-xl font-bold font-mono">
+                Episode {{ episode_id }}
+            </h1>
+            <button type="button" title="Refresh dataset media" aria-label="Refresh dataset media"
+                class="w-9 h-9 shrink-0 text-xl border border-slate-600 rounded hover:bg-slate-800 disabled:opacity-50"
+                :disabled="isRefreshing" @click="refreshData()">↻</button>
+        </div>
 
         {% if videos_info %}
         <!-- Error message -->
@@ -142,20 +147,22 @@
 
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-3 gap-y-6 w-full max-w-[98rem]">
             {% for video_info in videos_info %}
-            <div x-show='!videoCodecError && videosKeysSelected.includes({{ video_info.filename | tojson }})' class="w-full min-w-0 relative">
-                <p class="absolute inset-x-0 -top-4 text-sm text-gray-300 bg-gray-800 px-2 rounded-t-xl truncate">{{ video_info.filename }}</p>
-                <video muted autoplay playsinline preload="auto" type="video/mp4" class="object-contain w-full h-auto max-h-[70vh]"
-                    @canplaythrough="videoCanPlay"
-                    @timeupdate="videoTimeUpdated($event.currentTarget)"
-                    @ended="() => {
-                    $refs.btnPlay.classList.remove('hidden');
-                    $refs.btnPause.classList.add('hidden');
-                }"
-                    @loadedmetadata="() => ($refs.timer.textContent = formatTime(0) + ' / ' + formatTime(video.duration))">
-                    <source src="{{ video_info.url }}">
-                    Your browser does not support the video tag.
-                </video>
-            </div>
+            <template x-if='!videoCodecError && videosKeysSelected.includes({{ video_info.filename | tojson }})'>
+                <div class="w-full min-w-0 relative">
+                    <p class="absolute inset-x-0 -top-4 text-sm text-gray-300 bg-gray-800 px-2 rounded-t-xl truncate">{{ video_info.filename }}</p>
+                    <video data-dataset-video data-video-key="{{ video_info.filename }}" muted autoplay playsinline preload="auto"
+                        type="video/mp4" class="object-contain w-full h-auto max-h-[70vh]"
+                        @timeupdate="videoTimeUpdated($event.currentTarget)"
+                        @ended="() => {
+                            isVideoPaused = true;
+                            updatePlaybackButtons();
+                        }"
+                        @loadedmetadata="videoLoadedMetadata($event.currentTarget)">
+                        <source src="{{ video_info.url }}" type="video/mp4">
+                        Your browser does not support the video tag.
+                    </video>
+                </div>
+            </template>
             {% endfor %}
         </div>
         {% endif %}
@@ -178,16 +185,8 @@
         {% if videos_info %}
         <!-- Controllers -->
         <div class="flex gap-1 text-3xl items-center">
-            <button x-ref="btnPlay" class="-rotate-90" class="-rotate-90" title="Play. Toggle with Space" @click="() => {
-                videos.forEach(video => video.play());
-                $refs.btnPlay.classList.toggle('hidden');
-                $refs.btnPause.classList.toggle('hidden');
-            }">🔽</button>
-            <button x-ref="btnPause" class="hidden" title="Pause. Toggle with Space" @click="() => {
-                videos.forEach(video => video.pause());
-                $refs.btnPlay.classList.toggle('hidden');
-                $refs.btnPause.classList.toggle('hidden');
-            }">⏸️</button>
+            <button x-ref="btnPlay" class="-rotate-90" title="Play. Toggle with Space" @click="playVideos()">🔽</button>
+            <button x-ref="btnPause" class="hidden" title="Pause. Toggle with Space" @click="pauseVideos()">⏸️</button>
             <button title="Jump backward 5 seconds"
                 @click="() => (videos.forEach(video => (video.currentTime -= 5)))">⏪</button>
             <button title="Jump forward 5 seconds"
@@ -300,11 +299,10 @@
                 dygraphTime: 0.0,
                 dygraphIndex: 0,
                 videoFrameIndex: 0,
-                videos: null,
-                video: null,
+                isVideoPaused: false,
+                isRefreshing: false,
                 colors: null,
                 nVideos: {{ videos_info | length }},
-                nVideoReadyToPlay: 0,
                 videoCodecError: false,
                 isVideosDropdownOpen: false,
                 videosKeys: {{ videos_info | map(attribute='filename') | list | tojson }},
@@ -334,9 +332,6 @@
                     // Create a URL for the Blob
                     const csvUrl = URL.createObjectURL(blob);
 
-                    // process CSV data
-                    this.videos = document.querySelectorAll('video');
-                    this.video = this.videos[0] ?? null;
                     this.dygraph = new Dygraph(document.getElementById("graph"), csvUrl, {
                         pixelsPerPoint: 0.01,
                         legend: 'always',
@@ -412,6 +407,14 @@
                     ));
                 },
 
+                get videos() {
+                    return Array.from(document.querySelectorAll('video[data-dataset-video]'));
+                },
+
+                get video() {
+                    return this.videos[0] ?? null;
+                },
+
                 loadPreferences() {
                     try {
                         let storedPreferences = window.localStorage.getItem(this.preferencesStorageKey);
@@ -463,10 +466,33 @@
                 },
 
                 toggleVideoSelection(option) {
-                    this.videosKeysSelected = this.videosKeysSelected.includes(option)
-                        ? this.videosKeysSelected.filter(value => value !== option)
-                        : [...this.videosKeysSelected, option];
+                    if (this.videosKeysSelected.includes(option)) {
+                        const videoToUnload = this.videos.find(video => video.dataset.videoKey === option);
+                        if (videoToUnload) {
+                            videoToUnload.pause();
+                            videoToUnload.querySelectorAll('source').forEach(source => source.removeAttribute('src'));
+                            videoToUnload.load();
+                        }
+                        this.videosKeysSelected = this.videosKeysSelected.filter(value => value !== option);
+                    } else {
+                        this.videosKeysSelected = [...this.videosKeysSelected, option];
+                    }
                     this.savePreferences();
+                },
+
+                async refreshData() {
+                    if (this.isRefreshing) return;
+                    this.isRefreshing = true;
+                    try {
+                        await fetch({{ refresh_dataset_cache_url | tojson }}, {
+                            method: 'POST',
+                            cache: 'no-store',
+                        });
+                        window.location.reload();
+                    } catch (error) {
+                        this.isRefreshing = false;
+                        console.warn('Unable to refresh the dataset media cache.', error);
+                    }
                 },
 
                 // turn dygraph's 1D data (at a given time t) to 2D data that whose columns names are defined in this.columnNames.
@@ -573,6 +599,42 @@
                         '0' + seconds : seconds);
                 },
 
+                updatePlaybackButtons() {
+                    this.$refs.btnPlay.classList.toggle('hidden', !this.isVideoPaused);
+                    this.$refs.btnPause.classList.toggle('hidden', this.isVideoPaused);
+                },
+
+                playVideos() {
+                    this.isVideoPaused = false;
+                    this.videos.forEach(video => {
+                        const playPromise = video.play();
+                        if (playPromise) playPromise.catch(() => {});
+                    });
+                    this.updatePlaybackButtons();
+                },
+
+                pauseVideos() {
+                    this.isVideoPaused = true;
+                    this.videos.forEach(video => video.pause());
+                    this.updatePlaybackButtons();
+                },
+
+                videoLoadedMetadata(loadedVideo) {
+                    const time = Math.min(this.dygraphTime, loadedVideo.duration || this.dygraphTime);
+                    if (time > 0) loadedVideo.currentTime = time;
+                    if (this.isVideoPaused) {
+                        loadedVideo.pause();
+                    } else {
+                        const playPromise = loadedVideo.play();
+                        if (playPromise) playPromise.catch(() => {});
+                    }
+                    if (loadedVideo === this.video) {
+                        this.$refs.timer.textContent =
+                            this.formatTime(loadedVideo.currentTime) + ' / ' + this.formatTime(loadedVideo.duration);
+                        this.updatePlaybackButtons();
+                    }
+                },
+
                 videoTimeUpdated(updatedVideo) {
                     if (updatedVideo !== this.video || !this.video.duration || !this.dygraph) {
                         return;
@@ -598,14 +660,6 @@
                     this.$refs.timer.textContent =
                         this.formatTime(time) + ' / ' + this.formatTime(this.video.duration);
                     this.updateTimeQuery(time.toFixed(2));
-                },
-
-                videoCanPlay() {
-                    this.nVideoReadyToPlay += 1;
-                    if(this.nVideoReadyToPlay == this.nVideos) {
-                        // start autoplay all videos in sync
-                        this.$refs.btnPlay.click();
-                    }
                 }
             };
         }

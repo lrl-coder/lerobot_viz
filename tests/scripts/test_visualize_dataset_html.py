@@ -30,12 +30,14 @@ import lerobot.scripts.visualize_dataset_html as visualize_module
 from lerobot.datasets.utils import IterableNamespace
 from lerobot.scripts.visualize_dataset_html import (
     colorize_depth_frame,
+    configure_browser_cache,
     disable_browser_cache,
     get_default_video_keys_selected,
     get_depth_episode_path,
     get_depth_keys,
     get_episode_data,
     get_episodes_to_cache,
+    get_file_cache_version,
     get_generated_video_cache_dir,
     get_local_repo_id,
     get_raw_image_frame_paths,
@@ -201,6 +203,33 @@ def test_disable_browser_cache_sets_no_store_headers():
     assert response.headers["Expires"] == "0"
 
 
+def test_configure_browser_cache_caches_video_responses_only():
+    video_response = configure_browser_cache(Response(content_type="video/mp4", status=206))
+    html_response = configure_browser_cache(Response(content_type="text/html", status=200))
+
+    assert video_response.cache_control.private
+    assert video_response.cache_control.max_age == 31_536_000
+    assert video_response.cache_control.immutable
+    assert not video_response.cache_control.no_store
+    assert html_response.cache_control.no_store
+
+
+def test_file_cache_version_is_stable_and_changes_with_file_or_dataset(tmp_path):
+    first_video = tmp_path / "dataset-a" / "episode.mp4"
+    second_video = tmp_path / "dataset-b" / "episode.mp4"
+    first_video.parent.mkdir()
+    second_video.parent.mkdir()
+    first_video.write_bytes(b"first")
+    second_video.write_bytes(b"first")
+
+    first_version = get_file_cache_version(first_video)
+    assert get_file_cache_version(first_video) == first_version
+    assert get_file_cache_version(second_video) != first_version
+
+    first_video.write_bytes(b"updated-video")
+    assert get_file_cache_version(first_video) != first_version
+
+
 def test_local_repo_id_uses_dataset_root_directory_name():
     root = Path("/datasets/session_20260805_091643")
 
@@ -358,6 +387,7 @@ def test_template_renders_generated_video_for_image_dataset():
             episode_data_csv_str="timestamp,state_0\r\n0.0,1.0\r\n",
             columns=[{"key": "state", "value": ["state_0"]}],
             ignored_columns=[],
+            refresh_dataset_cache_url="/refresh-dataset-cache",
         )
 
     assert "<video" in page
@@ -392,7 +422,15 @@ def test_template_renders_generated_video_for_image_dataset():
     assert "frame_${String(videoFrameIndex).padStart(6, '0')}" in page
     assert "videoFrameIndex: 0" in page
     assert "this.dygraphIndex = this.videoFrameIndex" in page
-    assert "x-show='!videoCodecError && videosKeysSelected.includes(\"observation.image\")'" in page
+    assert "x-if='!videoCodecError && videosKeysSelected.includes(\"observation.image\")'" in page
+    assert 'data-video-key="observation.image"' in page
+    assert "get videos()" in page
+    assert "video[data-dataset-video]" in page
+    assert "this.videos = document.querySelectorAll('video')" not in page
+    assert "videoToUnload.querySelectorAll('source')" in page
+    assert "videoLoadedMetadata($event.currentTarget)" in page
+    assert 'fetch("/refresh-dataset-cache"' in page
+    assert "window.location.reload()" in page
 
 
 def test_depth_streams_are_matched_and_placed_below_rgb():

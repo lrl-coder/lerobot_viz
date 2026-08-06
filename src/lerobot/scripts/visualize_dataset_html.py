@@ -54,9 +54,11 @@ python -m lerobot.scripts.visualize_dataset_html \
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -77,6 +79,7 @@ from lerobot.datasets.utils import IterableNamespace
 from lerobot.utils.utils import init_logging
 
 DEPTH_KEY_PREFIX = "observation.images.depth."
+VIDEO_CACHE_MAX_AGE_SECONDS = 31_536_000
 DEPTH_COLORMAP = np.array(
     [
         [31, 12, 72],
@@ -99,6 +102,26 @@ def disable_browser_cache(response):
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+
+def configure_browser_cache(response):
+    """Cache versioned video responses while keeping dataset HTML uncached."""
+    if response.mimetype == "video/mp4" and 200 <= response.status_code < 400:
+        response.headers["Cache-Control"] = (
+            f"private, max-age={VIDEO_CACHE_MAX_AGE_SECONDS}, immutable"
+        )
+        response.headers.pop("Pragma", None)
+        response.headers.pop("Expires", None)
+        return response
+    return disable_browser_cache(response)
+
+
+def get_file_cache_version(path: Path) -> str:
+    """Return a stable, opaque version that changes with a file or its dataset path."""
+    path = Path(path).resolve()
+    stat = path.stat()
+    identity = f"{path}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
+    return hashlib.sha256(identity).hexdigest()[:16]
 
 
 def get_generated_video_cache_dir(dataset_root: Path | None, static_dir: Path) -> Path:
@@ -336,11 +359,26 @@ def run_server(
 ):
     app = Flask(__name__, static_folder=static_folder.resolve(), template_folder=template_folder.resolve())
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
-    app.after_request(disable_browser_cache)
+    app.after_request(configure_browser_cache)
 
     video_generation_locks: dict[Path, Lock] = {}
     video_generation_locks_guard = Lock()
     generated_videos_folder = Path(generated_videos_folder).resolve()
+    dataset_media_version = ""
+    dataset_media_version_lock = Lock()
+
+    def get_dataset_media_version() -> str:
+        with dataset_media_version_lock:
+            return dataset_media_version
+
+    def get_media_version(video_path: Path) -> str:
+        file_version = get_file_cache_version(video_path)
+        current_dataset_version = get_dataset_media_version()
+        return (
+            f"{file_version}-{current_dataset_version}"
+            if current_dataset_version
+            else file_version
+        )
 
     def get_episode_position(episode_id: int) -> int:
         if dataset.episodes is not None:
@@ -861,6 +899,13 @@ def run_server(
             )
         )
 
+    @app.post("/refresh-dataset-cache")
+    def refresh_dataset_cache():
+        nonlocal dataset_media_version
+        with dataset_media_version_lock:
+            dataset_media_version = secrets.token_urlsafe(8)
+        return "", 204
+
     @app.route(
         "/<string:dataset_namespace>/<string:dataset_name>/episode_<int:episode_id>/image-video/<path:image_key>"
     )
@@ -988,12 +1033,14 @@ def run_server(
             videos_info = []
             for key in dataset.meta.video_keys:
                 video_path = dataset.meta.get_video_file_path(episode_id, key)
-                if (dataset.root / video_path).is_file():
+                absolute_video_path = dataset.root / video_path
+                if absolute_video_path.is_file():
                     videos_info.append(
                         {
                             "url": url_for(
                                 "static",
                                 filename=str(video_path).replace("\\", "/"),
+                                v=get_media_version(absolute_video_path),
                             ),
                             "filename": video_path.parent.name,
                             "camera_key": key,
@@ -1001,6 +1048,7 @@ def run_server(
                         }
                     )
                 elif get_raw_image_video_path(episode_id, key).is_file():
+                    generated_video_path = get_raw_image_video_path(episode_id, key)
                     videos_info.append(
                         {
                             "url": url_for(
@@ -1009,6 +1057,7 @@ def run_server(
                                 dataset_name=dataset_name,
                                 episode_id=episode_id,
                                 camera_key=key,
+                                v=get_media_version(generated_video_path),
                             ),
                             "filename": key,
                             "camera_key": key,
@@ -1023,7 +1072,8 @@ def run_server(
                     )
             check_video_codec = any(not info["generated"] for info in videos_info)
             for image_key in dataset.meta.image_keys:
-                if get_image_video_path(episode_id, image_key).is_file():
+                generated_video_path = get_image_video_path(episode_id, image_key)
+                if generated_video_path.is_file():
                     videos_info.append(
                         {
                             "url": url_for(
@@ -1032,6 +1082,7 @@ def run_server(
                                 dataset_name=dataset_name,
                                 episode_id=episode_id,
                                 image_key=image_key,
+                                v=get_media_version(generated_video_path),
                             ),
                             "filename": image_key,
                             "camera_key": image_key,
@@ -1048,6 +1099,7 @@ def run_server(
             depth_videos_info = []
             rgb_keys = list(dataset.meta.camera_keys)
             for depth_key in get_cached_depth_keys(episode_id):
+                generated_video_path = get_depth_video_path(episode_id, depth_key)
                 depth_videos_info.append(
                     {
                         "url": url_for(
@@ -1056,6 +1108,7 @@ def run_server(
                             dataset_name=dataset_name,
                             episode_id=episode_id,
                             depth_key=depth_key,
+                            v=get_media_version(generated_video_path),
                         ),
                         "filename": depth_key,
                         "camera_key": depth_key,
@@ -1069,19 +1122,25 @@ def run_server(
             tasks = dataset.meta.episodes[episode_id]["tasks"]
         else:
             video_keys = [key for key, ft in dataset.features.items() if ft["dtype"] == "video"]
-            videos_info = [
-                {
-                    "url": f"https://huggingface.co/datasets/{repo_id}/resolve/main/"
-                    + dataset.video_path.format(
+            videos_info = []
+            for video_key in video_keys:
+                video_url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/" + (
+                    dataset.video_path.format(
                         episode_chunk=int(episode_id) // dataset.chunks_size,
                         video_key=video_key,
                         episode_index=episode_id,
-                    ),
-                    "filename": video_key,
-                    "generated": False,
-                }
-                for video_key in video_keys
-            ]
+                    )
+                )
+                current_dataset_version = get_dataset_media_version()
+                if current_dataset_version:
+                    video_url += f"?v={current_dataset_version}"
+                videos_info.append(
+                    {
+                        "url": video_url,
+                        "filename": video_key,
+                        "generated": False,
+                    }
+                )
             check_video_codec = bool(video_keys)
 
             response = requests.get(
@@ -1111,6 +1170,7 @@ def run_server(
             episode_data_csv_str=episode_data_csv_str,
             columns=columns,
             ignored_columns=ignored_columns,
+            refresh_dataset_cache_url=url_for("refresh_dataset_cache"),
         )
 
     if isinstance(dataset, LeRobotDataset):
