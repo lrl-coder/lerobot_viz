@@ -187,10 +187,8 @@
         <div class="flex gap-1 text-3xl items-center">
             <button x-ref="btnPlay" class="-rotate-90" title="Play. Toggle with Space" @click="playVideos()">🔽</button>
             <button x-ref="btnPause" class="hidden" title="Pause. Toggle with Space" @click="pauseVideos()">⏸️</button>
-            <button title="Jump backward 5 seconds"
-                @click="() => (videos.forEach(video => (video.currentTime -= 5)))">⏪</button>
-            <button title="Jump forward 5 seconds"
-                @click="() => (videos.forEach(video => (video.currentTime += 5)))">⏩</button>
+            <button title="Previous frame" @click="stepVideoFrames(-1)">⏪</button>
+            <button title="Next frame" @click="stepVideoFrames(1)">⏩</button>
             <button title="Rewind from start"
                 @click="() => (videos.forEach(video => (video.currentTime = 0.0)))">↩️</button>
             <input x-ref="slider" max="100" min="0" step="1" type="range" value="0" class="w-80 mx-2" @input="() => {
@@ -617,6 +615,22 @@
                     this.isVideoPaused = true;
                     this.videos.forEach(video => video.pause());
                     this.updatePlaybackButtons();
+                },
+
+                stepVideoFrames(frameDelta) {
+                    const videos = this.videos;
+                    if (!videos.length || !Number.isFinite(this.fps) || this.fps <= 0) return;
+
+                    this.pauseVideos();
+                    const frameDuration = 1 / this.fps;
+                    const currentFrame = Math.floor(videos[0].currentTime * this.fps + 1e-6);
+                    const targetTime = Math.max(0, (currentFrame + frameDelta) * frameDuration);
+                    videos.forEach(video => {
+                        const maxTime = Number.isFinite(video.duration)
+                            ? Math.max(0, video.duration - frameDuration)
+                            : targetTime;
+                        video.currentTime = Math.min(targetTime, maxTime);
+                    });
                 },
 
                 videoLoadedMetadata(loadedVideo) {
