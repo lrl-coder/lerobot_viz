@@ -416,6 +416,14 @@ def test_template_renders_generated_video_for_image_dataset():
     assert "!isLegacyPreferences" in page
     assert "value => JSON.stringify([column.key, value])" in page
     assert "this.graphSeriesSelected = this.graphSeriesKeys.filter" in page
+    assert 'aria-label="Playback speed"' in page
+    assert 'step="any"' in page
+    assert "playbackRate: 1" in page
+    assert "Number.isFinite(preferences.playbackRate)" in page
+    assert "playbackRate: this.playbackRate" in page
+    assert "setPlaybackRate(value, inputElement = null)" in page
+    assert "video.playbackRate = playbackRate" in page
+    assert "loadedVideo.playbackRate = this.playbackRate" in page
     assert "seriesKeys.length === this.colors.length" in page
     assert "this.dygraph.setVisibility(this.checked)" in page
     assert "this.colors.length).fill(false)" in page

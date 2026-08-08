@@ -184,7 +184,7 @@
 
         {% if videos_info %}
         <!-- Controllers -->
-        <div class="flex gap-1 text-3xl items-center">
+        <div class="flex flex-wrap gap-1 text-3xl items-center">
             <button x-ref="btnPlay" class="-rotate-90" title="Play. Toggle with Space" @click="playVideos()">🔽</button>
             <button x-ref="btnPause" class="hidden" title="Pause. Toggle with Space" @click="pauseVideos()">⏸️</button>
             <button title="Previous frame" @click="stepVideoFrames(-1)">⏪</button>
@@ -201,6 +201,15 @@
             <div x-ref="timer" class="font-mono text-sm border border-slate-500 rounded-lg px-1 py-0.5 shrink-0">0:00 /
                 0:00
             </div>
+            <label class="flex items-center gap-1 ml-1 text-sm font-mono shrink-0">
+                Speed
+                <input type="number" min="0.1" max="16" step="any" :value="playbackRate"
+                    class="w-20 rounded border border-slate-500 bg-slate-900 px-2 py-1 text-right"
+                    aria-label="Playback speed"
+                    @change="setPlaybackRate($event.target.value, $event.target)"
+                    @keydown.enter="$event.target.blur()">
+                <span>x</span>
+            </label>
             <div x-show="dygraph" class="font-mono text-sm border border-slate-500 rounded-lg px-1 py-0.5 shrink-0"
                 x-text="`frame_${String(videoFrameIndex).padStart(6, '0')} / frame_${String(dygraph ? Math.max(dygraph.numRows() - 1, 0) : 0).padStart(6, '0')}`">
                 frame_000000
@@ -306,6 +315,7 @@
                 videosKeys: {{ videos_info | map(attribute='filename') | list | tojson }},
                 videosKeysSelected: {{ default_video_keys_selected | tojson }},
                 graphSeriesSelected: [],
+                playbackRate: 1,
                 preferencesStorageKey: "lerobot-viz:preferences:v2",
                 legacyPreferencesStorageKey: "lerobot-viz:preferences:v1",
                 fps: {{ dataset_info.fps }},
@@ -445,6 +455,14 @@
                         ) {
                             this.graphSeriesSelected = preferences.graphSeriesSelected;
                         }
+                        if (
+                            !isLegacyPreferences
+                            && Number.isFinite(preferences.playbackRate)
+                            && preferences.playbackRate >= 0.1
+                            && preferences.playbackRate <= 16
+                        ) {
+                            this.playbackRate = preferences.playbackRate;
+                        }
                         if (isLegacyPreferences) this.savePreferences();
                     } catch (error) {
                         console.warn("Unable to load visualizer preferences from localStorage.", error);
@@ -457,6 +475,7 @@
                             version: 2,
                             videosKeysSelected: this.videosKeysSelected,
                             graphSeriesSelected: this.graphSeriesSelected,
+                            playbackRate: this.playbackRate,
                         }));
                     } catch (error) {
                         console.warn("Unable to save visualizer preferences to localStorage.", error);
@@ -602,9 +621,23 @@
                     this.$refs.btnPause.classList.toggle('hidden', this.isVideoPaused);
                 },
 
+                setPlaybackRate(value, inputElement = null) {
+                    const playbackRate = Number(value);
+                    if (!Number.isFinite(playbackRate) || playbackRate < 0.1 || playbackRate > 16) {
+                        if (inputElement) inputElement.value = this.playbackRate;
+                        return;
+                    }
+
+                    this.playbackRate = playbackRate;
+                    this.videos.forEach(video => (video.playbackRate = playbackRate));
+                    if (inputElement) inputElement.value = playbackRate;
+                    this.savePreferences();
+                },
+
                 playVideos() {
                     this.isVideoPaused = false;
                     this.videos.forEach(video => {
+                        video.playbackRate = this.playbackRate;
                         const playPromise = video.play();
                         if (playPromise) playPromise.catch(() => {});
                     });
@@ -634,6 +667,7 @@
                 },
 
                 videoLoadedMetadata(loadedVideo) {
+                    loadedVideo.playbackRate = this.playbackRate;
                     const time = Math.min(this.dygraphTime, loadedVideo.duration || this.dygraphTime);
                     if (time > 0) loadedVideo.currentTime = time;
                     if (this.isVideoPaused) {

@@ -47,7 +47,7 @@ uv pip install \
 ```bash
 source .venv/bin/activate
 
-PYTHONPATH="$PWD/lerobot-src-v0.3.3/src" python -m lerobot.scripts.visualize_dataset_html \
+PYTHONPATH="$PWD/lerobot-src-v0.3.3/src" /root/autodl-tmp/lerobot_viz/.venv/bin/python -m lerobot.scripts.visualize_dataset_html \
   --root /path/to/session_name \
   --host 0.0.0.0 \
   --port 9090
